@@ -1,0 +1,4 @@
+# VerifyGrid Database Migrations
+
+Generic single-database configuration with Alembic.
+Migrations are managed in `migrations/versions/`.
