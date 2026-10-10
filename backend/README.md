@@ -1,137 +1,213 @@
-# VerifyGrid Backend — Data Preprocessing & Normalization
+# VerifyGrid Backend
 
-VerifyGrid is an intelligent data verification and reconciliation platform. This document covers the **Data Preprocessing & Normalization Layer**, which ingests raw CSV and XLSX files and transforms them into clean, standardized datasets ready for verification.
+VerifyGrid is an intelligent data verification and reconciliation platform designed to ingest, normalize, and reconcile structured datasets (CSV and XLSX).
 
 ---
 
-## 1. Preprocessing Pipeline Overview
+## 1. Tech Stack & Architecture
 
-The preprocessing pipeline executes in a modular, memory-conscious sequence:
+- **Framework**: [FastAPI](https://fastapi.tiangolo.com/) (Python 3.12+)
+- **Database & ORM**: PostgreSQL via [SQLAlchemy 2.0](https://www.sqlalchemy.org/) and [psycopg 3](https://www.psycopg.org/)
+- **Migrations**: [Alembic](https://alembic.sqlalchemy.org/)
+- **Validation & Schemas**: [Pydantic v2](https://docs.pydantic.dev/)
+- **File Parsing & Processing**: Standard `csv`, `openpyxl`, `python-dateutil`
+- **Testing**: [pytest](https://docs.pytest.org/), `TestClient` (FastAPI / Starlette) with SQLite in-memory isolation for unit tests and live PostgreSQL integration tests
+
+---
+
+## 2. Directory Structure
+
+```
+backend/
+├── app/
+│   ├── api/
+│   │   └── v1/
+│   │       ├── endpoints/
+│   │       │   ├── projects.py         # Project management endpoints
+│   │       │   ├── uploads.py          # CSV/XLSX file upload endpoints
+│   │       │   └── preprocessing.py    # Preprocessing & normalization endpoints
+│   │       └── router.py               # API v1 router registration & health checks
+│   ├── core/
+│   │   └── config.py                   # Application settings & environment config
+│   ├── db/
+│   │   ├── base.py                     # SQLAlchemy DeclarativeBase
+│   │   └── session.py                  # Database engine & sessionmaker
+│   ├── models/                         # SQLAlchemy models (User, Project, SourceFile)
+│   ├── schemas/                        # Pydantic schemas (Project, Upload, Preprocessing)
+│   ├── services/
+│   │   ├── ingestion.py                # File upload storage & validation
+│   │   ├── preprocessing.py            # Preprocessing & normalization pipeline
+│   │   └── project_service.py          # Project business logic
+│   └── utils/
+│       └── normalization.py            # Column, number, date, and string cleaners
+├── migrations/                         # Alembic database migrations
+├── storage/uploads/                    # Local storage root for uploaded files
+├── tests/                              # Automated test suite
+├── .env.example                        # Example environment variables
+├── alembic.ini                         # Alembic configuration
+└── requirements.txt                    # Python dependencies
+```
+
+---
+
+## 3. Getting Started
+
+### Prerequisites
+
+- Python 3.12+
+- PostgreSQL (optional for local SQLite unit tests, required for live DB development)
+
+### Setup & Installation
+
+1. **Activate virtual environment:**
+   - **Windows (PowerShell):**
+     ```powershell
+     & ".venv\Scripts\Activate.ps1"
+     ```
+   - **Linux / macOS:**
+     ```bash
+     source .venv/bin/activate
+     ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment variables:**
+   Copy `.env.example` to `.env` and set your database connection string:
+   ```ini
+   DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/verifygrid
+   STORAGE_ROOT=storage/uploads
+   MAX_UPLOAD_BYTES=26214400
+   ```
+
+4. **Run database migrations:**
+   ```bash
+   alembic upgrade head
+   ```
+
+5. **Start the development server:**
+   ```bash
+   uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   ```
+   Interactive Swagger documentation will be available at [http://localhost:8000/docs](http://localhost:8000/docs).
+
+---
+
+## 4. API Endpoints
+
+### System & Health
+- `GET /` — API welcome message and version.
+- `GET /api/v1/health` — Application liveness probe.
+- `GET /api/v1/health/db` — PostgreSQL database connectivity check.
+
+### Projects
+- `POST /api/v1/projects` — Create a new reconciliation project.
+- `GET /api/v1/projects?skip=0&limit=100` — List projects with pagination.
+
+### File Uploads
+- `POST /api/v1/projects/{project_id}/files` — Upload a CSV or XLSX source file (scoped to project, max 25MB).
+
+### Preprocessing & Normalization
+- `POST /api/v1/projects/{project_id}/files/{file_id}/preprocess` — Trigger preprocessing and normalization on an uploaded file with optional configuration rules.
+
+---
+
+## 5. Data Preprocessing & Normalization Pipeline
+
+The preprocessing layer standardizes raw datasets before ingestion into the verification engine:
 
 ```
 [Uploaded File (CSV / XLSX)]
              │
              ▼
 [1. Safe Ingestion & Decoding]
-   - File size & empty-file checks
-   - Encoding fallback (UTF-8-SIG, UTF-8, CP1252, Latin-1)
+   - File size & empty-file validation
+   - Multi-encoding fallback (UTF-8-SIG, UTF-8, CP1252, Latin-1)
    - Delimiter sniffing (comma, tab, semicolon, pipe)
-   - Read-only streaming for XLSX
+   - Memory-safe streaming for XLSX via openpyxl
              │
              ▼
 [2. Header Extraction & Normalization]
    - Missing header detection
    - Column name standardization (lower_snake_case)
-   - Duplicate column deduplication with indexed suffixes
-   - Original header mapping preserved
+   - Duplicate column deduplication with indexed suffixes (_1, _2)
+   - Original header mappings preserved
              │
              ▼
-[3. Row-by-Row Cleaning & Type Detection]
-   - Whitespace stripping
-   - Null representation canonicalization
-   - Leading zero / identifier preservation (e.g., "00123", "02138")
-   - Number normalization (thousands separators, currency, accounting brackets)
-   - Date parsing to ISO-8601 (YYYY-MM-DD / YYYY-MM-DDTHH:MM:SS)
+[3. Row Cleaning & Type Detection]
+   - Whitespace trimming
+   - Configurable null value canonicalization
+   - Leading zero / identifier preservation (e.g., "00123")
+   - Numeric normalization (currency symbols, grouping commas, accounting parentheses)
+   - Date parsing to ISO-8601 (YYYY-MM-DD)
    - Boolean normalization ("true"/"false", "yes"/"no")
    - Source row number preservation (1-based index)
              │
              ▼
 [4. Validation & Anomaly Reporting]
    - Empty row detection and indexing
-   - Duplicate record identification (grouped by 1-based source row numbers)
+   - Duplicate record identification without deletion
    - Column type inconsistency / mismatch detection
-   - Safety row count limit enforcement
+   - Maximum row safety limits
              │
              ▼
 [Structured Response & Status Update]
-   - Updates SourceFile database status to "preprocessed" or "preprocessing_failed"
+   - Updates SourceFile record status to "preprocessed" or "preprocessing_failed"
    - Returns structured metadata, warnings/errors, and normalized preview rows
 ```
 
----
+### Supported Formats
 
-## 2. Supported Formats & Parsing Behavior
+| Format | Extension | Library | Parser Behavior |
+|---|---|---|---|
+| **CSV** | `.csv` | Standard `csv.reader` | Delimiter sniffing (`,`, `\t`, `;`, pipe). Supports `UTF-8`, `UTF-8-SIG` (BOM), `CP1252`, and `Latin-1`. `skipinitialspace=True` for robust quote parsing. |
+| **Excel** | `.xlsx` | `openpyxl` | Parsed with `read_only=True` and `data_only=True` for memory efficiency. |
 
-| Format | Library | Details |
-|---|---|---|
-| **CSV** (`.csv`) | Standard `csv.reader` | Uses safe dialect sniffing for `,`, `\t`, `;`, `\|`. Supports `UTF-8`, `UTF-8-SIG` (BOM), `CP1252`, and `Latin-1`. Skips initial space for resilient quote parsing. |
-| **XLSX** (`.xlsx`) | `openpyxl` | Parsed with `read_only=True` and `data_only=True` to stream worksheet cell values efficiently without loading rich formatting into memory. |
+### Normalization Rules
 
----
+1. **Column Normalization**:
+   - Headers converted to clean `snake_case` (e.g., `"Employee ID"` → `"employee_id"`).
+   - Duplicate headers renamed with suffix (`"id"`, `"id_1"`).
+   - Mapping preserved in `column_mapping`.
+2. **Identifiers & Leading Zeros**:
+   - Digit sequences with leading zeros (e.g., `"00123"`, `"09876"`) are preserved as strings and tagged with detected type `identifier`.
+   - Columns specified in `config.identifier_columns` are always kept as strings.
+3. **Numeric & Currency**:
+   - Strips currency signs (`$`, `€`, `£`, `₹`) and thousand separators (`1,250.50` → `1250.5`).
+   - Parses accounting negatives (`(50.25)` → `-50.25`).
+   - Mixed integer/float columns are unified to `float`.
+4. **Dates**:
+   - Standardizes calendar formats into ISO-8601 (`YYYY-MM-DD`).
+5. **Null Values**:
+   - Treats configurable tokens as `None` (case-insensitive): `""`, `"null"`, `"none"`, `"nil"`, `"n/a"`, `"na"`, `"nan"`, `"-"`, `"--"`, `"undefined"`, `"#n/a"`.
+6. **Duplicate Records**:
+   - Detects identical rows across all columns.
+   - Preserves all rows and returns groups of 1-based source row numbers for auditability.
+7. **Validation Issues**:
+   - Returns structured issues with `level` (`error` or `warning`), `issue_type`, `message`, and optional `row_number` and `column_name`.
 
-## 3. Normalization Rules & Capabilities
-
-### Column Normalization
-- Converts headers into clean `snake_case` (e.g., `"Employee ID"` → `"employee_id"`, `"First Name"` → `"first_name"`).
-- Original column headers are preserved in `column_mapping` (`{ "Original Header": "normalized_name" }`).
-- Duplicate headers are deduplicated by appending an incremental index (`"id"`, `"id_1"`, `"id_2"`) with a warning logged in `issues`.
-
-### Leading Zero & Identifier Preservation
-- Values with leading zeros (e.g., `"00123"`, `"0987654321"`) are **never silently converted to numbers**. They are typed as `identifier` and preserved as strings.
-- Columns declared in `config.identifier_columns` are strictly preserved as string identifiers regardless of content.
-
-### Numeric & Currency Normalization
-- Standardizes integer and floating-point values.
-- Removes currency symbols (`$`, `€`, `£`, `₹`) and thousand grouping commas (`"1,250.50"` → `1250.5`).
-- Parses accounting-style negative parentheses (`"(50.25)"` → `-50.25`).
-- Mixed integer and float values within a column are unified to `float`.
-
-### Date Normalization
-- Parses standard calendar formats into ISO-8601 dates (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`).
-- Avoids misinterpreting short integers as dates.
-
-### Null Value Normalization
-- Standardizes empty cells and string null representations into `None`.
-- Default null tokens (case-insensitive): `""`, `"null"`, `"none"`, `"nil"`, `"n/a"`, `"na"`, `"nan"`, `"-"`, `"--"`, `"undefined"`, `"#n/a"`.
-
-### Duplicate Record Detection
-- Duplicate records across all columns are detected and grouped by 1-based source row numbers.
-- Records are **not deleted** automatically; their presence and source row numbers are returned for review.
-
-### Validation Warnings & Errors
-Issues are categorized with severity levels (`error`, `warning`):
-- `empty_file`: 0-byte or blank file.
-- `missing_headers`: Header row not found.
-- `duplicate_header`: Duplicate column header found in file.
-- `empty_rows`: Rows where every cell is null or blank.
-- `duplicate_records`: Duplicate records identified.
-- `type_mismatch`: Value type diverges from dominant column data type.
-- `mixed_column_types`: Column contains inconsistent data types without clear dominant type.
-- `malformed_row`: Row has unexpected field count relative to the header.
-- `row_limit_reached`: Source row count exceeded `max_rows` threshold.
-- `corrupted_file`: File could not be parsed as valid spreadsheet or CSV.
-
----
-
-## 4. Configurable Options (`PreprocessingConfig`)
-
-Callers can pass a custom JSON payload to `POST /api/v1/projects/{project_id}/files/{file_id}/preprocess`:
+### Configurable Options (`PreprocessingConfig`)
 
 ```json
 {
   "strip_whitespace": true,
   "normalize_column_names": true,
-  "null_values": ["", "null", "none", "n/a", "na", "nan", "-", "--", "undefined", "#n/a", "UNKNOWN"],
+  "null_values": ["", "null", "none", "n/a", "na", "nan", "-", "--", "undefined", "#n/a"],
   "normalize_dates": true,
   "normalize_numbers": true,
-  "identifier_columns": ["account_number", "customer_code"],
+  "identifier_columns": ["account_number", "roll_no"],
   "max_rows": 100000
 }
 ```
 
----
+### Preprocessing Response Example
 
-## 5. API Endpoint
-
-### `POST /api/v1/projects/{project_id}/files/{file_id}/preprocess`
-
-**Request:** Optional JSON body matching `PreprocessingConfig`.
-
-**Response (`PreprocessingResultResponse`):**
 ```json
 {
-  "source_file_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "project_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "source_file_id": "8c37d0da-514e-4f76-9057-a5ec0902f232",
+  "project_id": "b96874eb-3146-4c28-98e3-bbef08542c3d",
   "original_filename": "employees.csv",
   "file_type": "csv",
   "total_source_rows": 3,
@@ -146,17 +222,27 @@ Callers can pass a custom JSON payload to `POST /api/v1/projects/{project_id}/fi
       "null_count": 0,
       "non_null_count": 2,
       "sample_values": ["00101", "00102"]
+    },
+    {
+      "original_name": "Salary",
+      "normalized_name": "salary",
+      "detected_type": "float",
+      "null_count": 0,
+      "non_null_count": 2,
+      "sample_values": [85000.5, 62000]
     }
   ],
   "column_mapping": {
-    "Employee ID": "employee_id"
+    "Employee ID": "employee_id",
+    "Salary": "salary"
   },
   "duplicate_record_row_numbers": [],
   "issues": [],
   "preview_rows": [
     {
       "source_row_number": 2,
-      "employee_id": "00101"
+      "employee_id": "00101",
+      "salary": 85000.5
     }
   ]
 }
@@ -166,15 +252,15 @@ Callers can pass a custom JSON payload to `POST /api/v1/projects/{project_id}/fi
 
 ## 6. Running Tests
 
-Run the full automated test suite using `pytest`:
+Execute the automated test suite with `pytest`:
 
-```powershell
-# From the backend directory
-& ".venv\Scripts\python.exe" -m pytest tests/ -v
-```
+```bash
+# Run all tests
+pytest tests/ -v
 
-Run only the preprocessing test suite:
+# Run only preprocessing tests
+pytest tests/test_preprocessing.py -v
 
-```powershell
-& ".venv\Scripts\python.exe" -m pytest tests/test_preprocessing.py -v
+# Run with python module syntax
+python -m pytest tests/ -v
 ```
