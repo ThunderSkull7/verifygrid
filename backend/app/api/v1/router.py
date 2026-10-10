@@ -5,6 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.api.v1.endpoints.projects import router as projects_router
+from app.api.v1.endpoints.uploads import router as uploads_router
 
 logger = logging.getLogger(__name__)
 
@@ -50,3 +51,4 @@ def health_check_db(db: Session = Depends(get_db)):
 
 # Include resource routers
 api_router.include_router(projects_router, prefix="/projects", tags=["Projects"])
+api_router.include_router(uploads_router, tags=["Uploads"])
