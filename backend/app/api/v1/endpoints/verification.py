@@ -133,9 +133,11 @@ def list_run_discrepancies_endpoint(
     limit: int = Query(50, ge=1, le=200),
     discrepancy_category: Optional[str] = Query(None),
     match_status: Optional[str] = Query(None),
+    sort_by: str = Query("source_row_number", description="Field to sort by"),
+    sort_order: str = Query("asc", pattern="^(asc|desc)$", description="'asc' or 'desc'"),
     db: Session = Depends(get_db),
 ) -> DiscrepancyListResponse:
-    """Paginate run discrepancies."""
+    """Paginate, filter, and sort run discrepancies."""
     total, items = list_run_discrepancies(
         db=db,
         project_id=project_id,
@@ -144,6 +146,8 @@ def list_run_discrepancies_endpoint(
         limit=limit,
         discrepancy_category=discrepancy_category,
         match_status=match_status,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
     return DiscrepancyListResponse(
         total=total,
@@ -151,4 +155,21 @@ def list_run_discrepancies_endpoint(
         skip=skip,
         limit=limit,
     )
+
+
+@router.get(
+    "/projects/{project_id}/runs/{run_id}/summary",
+    status_code=status.HTTP_200_OK,
+    summary="Get verification run summary metrics",
+    description="Retrieves summary metrics dictionary for a specific verification run.",
+)
+def get_run_summary_endpoint(
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Get run summary metrics."""
+    run = get_verification_run(db=db, project_id=project_id, run_id=run_id)
+    return run.summary or {}
+
 

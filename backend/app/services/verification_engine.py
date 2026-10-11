@@ -1031,10 +1031,33 @@ def list_run_discrepancies(
     limit: int = 50,
     discrepancy_category: Optional[str] = None,
     match_status: Optional[str] = None,
+    sort_by: str = "source_row_number",
+    sort_order: str = "asc",
 ) -> Tuple[int, List[VerificationDiscrepancy]]:
-    """Paginate and filter discrepancy results for an authorized verification run."""
+    """Paginate, filter, and sort discrepancy results for an authorized verification run."""
     # Enforce project ownership
     get_verification_run(db, project_id, run_id)
+
+    valid_sort_fields = {
+        "source_row_number": VerificationDiscrepancy.source_row_number,
+        "target_row_number": VerificationDiscrepancy.target_row_number,
+        "created_at": VerificationDiscrepancy.created_at,
+        "match_status": VerificationDiscrepancy.match_status,
+        "discrepancy_category": VerificationDiscrepancy.discrepancy_category,
+    }
+    clean_sort_by = sort_by.strip()
+    if clean_sort_by not in valid_sort_fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid sort_by field '{sort_by}'. Valid fields are: {list(valid_sort_fields.keys())}",
+        )
+
+    clean_sort_order = sort_order.strip().lower()
+    if clean_sort_order not in ["asc", "desc"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid sort_order '{sort_order}'. Valid orders are 'asc' and 'desc'.",
+        )
 
     query = db.query(VerificationDiscrepancy).filter(VerificationDiscrepancy.run_id == run_id)
     if discrepancy_category:
@@ -1043,15 +1066,26 @@ def list_run_discrepancies(
         query = query.filter(VerificationDiscrepancy.match_status == match_status)
 
     total = query.count()
+
+    col = valid_sort_fields[clean_sort_by]
+    order_clause = col.desc().nulls_last() if clean_sort_order == "desc" else col.asc().nulls_last()
+
     items = (
-        query.order_by(
-            VerificationDiscrepancy.source_row_number.asc().nulls_last(),
-            VerificationDiscrepancy.target_row_number.asc().nulls_last(),
-            VerificationDiscrepancy.created_at.asc(),
-        )
+        query.order_by(order_clause, VerificationDiscrepancy.created_at.asc())
         .offset(skip)
         .limit(limit)
         .all()
     )
     return total, items
+
+
+def get_verification_run_summary(
+    db: Session,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> Dict[str, Any]:
+    """Retrieve only the summary metrics for an authorized verification run."""
+    run = get_verification_run(db, project_id, run_id)
+    return run.summary or {}
+
 
