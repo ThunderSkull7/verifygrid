@@ -6,6 +6,7 @@ duplicate matching keys, and field-level discrepancies.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import math
 from collections import defaultdict
 from pathlib import Path
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.source_file import SourceFile
+from app.models.verification_run import VerificationRun, VerificationDiscrepancy
 from app.schemas.preprocessing import ColumnMetadata, PreprocessingConfig, ValidationIssue
 from app.schemas.result import (
     DiscrepancyCategory,
@@ -804,3 +806,252 @@ def verify_project_files(
         warnings=all_warnings,
         errors=comp_errors,
     )
+
+
+def create_and_execute_verification_run(
+    db: Session,
+    project_id: uuid.UUID,
+    request: VerificationRequest,
+) -> VerificationRun:
+    """
+    Create a persistent VerificationRun record, execute reconciliation,
+    store summary metrics and individual discrepancy items in a safe transaction.
+    """
+    # 1. Project existence & authorization check
+    project = get_project_by_id(db, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
+    # 2. Source files isolation & project scoping check
+    source_file = db.query(SourceFile).filter(
+        SourceFile.id == request.source_file_id,
+        SourceFile.project_id == project_id,
+    ).first()
+    if source_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source file not found for this project.",
+        )
+
+    target_file = db.query(SourceFile).filter(
+        SourceFile.id == request.target_file_id,
+        SourceFile.project_id == project_id,
+    ).first()
+    if target_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target file not found for this project.",
+        )
+
+    # 3. Path safety and existence
+    storage_root_resolved = settings.storage_root.resolve()
+    for f_obj, role in [(source_file, "Source"), (target_file, "Target")]:
+        try:
+            path_resolved = Path(f_obj.storage_path).resolve()
+            if not str(path_resolved).startswith(str(storage_root_resolved)):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access to {role.lower()} file path is restricted.",
+                )
+            if not path_resolved.exists():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"{role} file content not found on disk.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"{role} file storage path could not be resolved.",
+            )
+
+    # 4. Create persistent run in running state
+    now_utc = datetime.now(timezone.utc)
+    config_dict = {
+        "compare_columns": request.compare_columns,
+        "ignore_columns": request.ignore_columns,
+        "numeric_tolerance": request.numeric_tolerance,
+        "ignore_whitespace": request.ignore_whitespace,
+        "ignore_case": request.ignore_case,
+        "include_identical": request.include_identical,
+    }
+
+    run = VerificationRun(
+        project_id=project_id,
+        source_file_id=source_file.id,
+        target_file_id=target_file.id,
+        status="running",
+        key_columns=request.key_columns,
+        column_mapping=request.column_mapping or {},
+        configuration=config_dict,
+        started_at=now_utc,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    # 5. Execute verification safely
+    cfg = request.preprocessing_config or PreprocessingConfig()
+    src_path = Path(source_file.storage_path).resolve()
+    tgt_path = Path(target_file.storage_path).resolve()
+
+    try:
+        with db.begin_nested():
+            (
+                src_records,
+                src_cols,
+                src_mapping,
+                src_dup_rows,
+                src_empty_rows,
+                src_issues,
+                src_total,
+            ) = extract_dataset_records(src_path, source_file.file_type, cfg)
+
+            (
+                tgt_records,
+                tgt_cols,
+                tgt_mapping,
+                tgt_dup_rows,
+                tgt_empty_rows,
+                tgt_issues,
+                tgt_total,
+            ) = extract_dataset_records(tgt_path, target_file.file_type, cfg)
+
+            summary, results, discrepancies, comp_warnings, comp_errors = verify_datasets(
+                source_records=src_records,
+                target_records=tgt_records,
+                key_columns=request.key_columns,
+                column_mapping=request.column_mapping,
+                compare_columns=request.compare_columns,
+                ignore_columns=request.ignore_columns,
+                numeric_tolerance=request.numeric_tolerance,
+                ignore_whitespace=request.ignore_whitespace,
+                ignore_case=request.ignore_case,
+                null_values=cfg.null_values,
+                include_identical=request.include_identical,
+            )
+
+            run.status = "completed"
+            run.summary = summary.model_dump()
+            run.completed_at = datetime.now(timezone.utc)
+
+            # Bulk save discrepancies (never store full dataset rows, only discrepancies)
+            for item in discrepancies:
+                disc = VerificationDiscrepancy(
+                    run_id=run.id,
+                    match_status=item.match_status.value,
+                    discrepancy_category=item.discrepancy_category.value,
+                    key_values=item.key_values,
+                    source_row_number=item.source_row_number,
+                    target_row_number=item.target_row_number,
+                    source_row_numbers=item.source_row_numbers,
+                    target_row_numbers=item.target_row_numbers,
+                    source_record=item.source_record,
+                    target_record=item.target_record,
+                    field_differences=[d.model_dump() for d in item.field_differences] if item.field_differences else None,
+                    message=item.message,
+                )
+                db.add(disc)
+
+        db.commit()
+        db.refresh(run)
+        return run
+
+    except Exception as exc:
+        try:
+            run.status = "failed"
+            error_detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            run.error_message = error_detail
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            pass
+        raise
+
+
+
+def get_verification_run(
+    db: Session,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> VerificationRun:
+    """Retrieve a verification run with project authorization check."""
+    project = get_project_by_id(db, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
+    run = db.query(VerificationRun).filter(
+        VerificationRun.id == run_id,
+        VerificationRun.project_id == project_id,
+    ).first()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Verification run not found for this project.",
+        )
+    return run
+
+
+def list_verification_runs(
+    db: Session,
+    project_id: uuid.UUID,
+    skip: int = 0,
+    limit: int = 20,
+    status_filter: Optional[str] = None,
+) -> Tuple[int, List[VerificationRun]]:
+    """List verification runs for a project with pagination and status filtering."""
+    project = get_project_by_id(db, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
+    query = db.query(VerificationRun).filter(VerificationRun.project_id == project_id)
+    if status_filter:
+        query = query.filter(VerificationRun.status == status_filter)
+
+    total = query.count()
+    items = query.order_by(VerificationRun.created_at.desc()).offset(skip).limit(limit).all()
+    return total, items
+
+
+def list_run_discrepancies(
+    db: Session,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    skip: int = 0,
+    limit: int = 50,
+    discrepancy_category: Optional[str] = None,
+    match_status: Optional[str] = None,
+) -> Tuple[int, List[VerificationDiscrepancy]]:
+    """Paginate and filter discrepancy results for an authorized verification run."""
+    # Enforce project ownership
+    get_verification_run(db, project_id, run_id)
+
+    query = db.query(VerificationDiscrepancy).filter(VerificationDiscrepancy.run_id == run_id)
+    if discrepancy_category:
+        query = query.filter(VerificationDiscrepancy.discrepancy_category == discrepancy_category)
+    if match_status:
+        query = query.filter(VerificationDiscrepancy.match_status == match_status)
+
+    total = query.count()
+    items = (
+        query.order_by(
+            VerificationDiscrepancy.source_row_number.asc().nulls_last(),
+            VerificationDiscrepancy.target_row_number.asc().nulls_last(),
+            VerificationDiscrepancy.created_at.asc(),
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return total, items
+

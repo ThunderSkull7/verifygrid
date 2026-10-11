@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
@@ -271,3 +272,64 @@ class VerificationResponse(BaseModel):
     )
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class VerificationRunResponse(BaseModel):
+    """Structured response for a persistent verification run."""
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    source_file_id: Optional[uuid.UUID] = None
+    target_file_id: Optional[uuid.UUID] = None
+    status: str
+    key_columns: List[str]
+    column_mapping: Optional[Dict[str, str]] = None
+    configuration: Optional[Dict[str, Any]] = None
+    summary: Optional[Dict[str, Any]] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class VerificationRunListResponse(BaseModel):
+    """Paginated list of verification runs."""
+
+    total: int
+    items: List[VerificationRunResponse]
+    skip: int
+    limit: int
+
+
+class DiscrepancyItemResponse(BaseModel):
+    """Individual discrepancy item belonging to a verification run."""
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    match_status: str
+    discrepancy_category: str
+    key_values: Dict[str, Any]
+    source_row_number: Optional[int] = None
+    target_row_number: Optional[int] = None
+    source_row_numbers: Optional[List[int]] = None
+    target_row_numbers: Optional[List[int]] = None
+    source_record: Optional[Dict[str, Any]] = None
+    target_record: Optional[Dict[str, Any]] = None
+    field_differences: Optional[List[Dict[str, Any]]] = None
+    message: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DiscrepancyListResponse(BaseModel):
+    """Paginated list of discrepancy results for a verification run."""
+
+    total: int
+    items: List[DiscrepancyItemResponse]
+    skip: int
+    limit: int
+

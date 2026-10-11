@@ -10,12 +10,16 @@ from app.schemas.preprocessing import (
 )
 from app.schemas.result import (
     DiscrepancyCategory,
+    DiscrepancyItemResponse,
+    DiscrepancyListResponse,
     FieldDifference,
     InMemoryVerificationRequest,
     MatchStatus,
     VerificationRequest,
     VerificationResponse,
     VerificationResultItem,
+    VerificationRunListResponse,
+    VerificationRunResponse,
     VerificationSummary,
 )
 
@@ -36,5 +40,10 @@ __all__ = [
     "VerificationRequest",
     "InMemoryVerificationRequest",
     "VerificationResponse",
+    "VerificationRunResponse",
+    "VerificationRunListResponse",
+    "DiscrepancyItemResponse",
+    "DiscrepancyListResponse",
 ]
+
 

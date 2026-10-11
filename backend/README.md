@@ -115,7 +115,11 @@ backend/
 - `POST /api/v1/projects/{project_id}/files/{file_id}/preprocess` — Trigger preprocessing and normalization on an uploaded file with optional configuration rules.
 
 ### Verification & Reconciliation
-- `POST /api/v1/projects/{project_id}/verify` — Execute the core verification engine comparing two project source files across single or composite keys, detecting matches, missing records, duplicate keys, and field-level discrepancies.
+- `POST /api/v1/projects/{project_id}/verify` — Execute the in-memory core verification engine comparing two project source files across single or composite keys, detecting matches, missing records, duplicate keys, and field-level discrepancies.
+- `POST /api/v1/projects/{project_id}/runs` — Create and execute a persistent verification run, storing run status, summary metrics, and discrepancies.
+- `GET /api/v1/projects/{project_id}/runs` — List verification runs for a project with pagination and status filtering.
+- `GET /api/v1/projects/{project_id}/runs/{run_id}` — Retrieve details and summary metrics for a specific verification run.
+- `GET /api/v1/projects/{project_id}/runs/{run_id}/results` — Paginate and filter discrepancy results for a verification run.
 
 ---
 

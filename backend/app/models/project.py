@@ -52,3 +52,9 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    verification_runs: Mapped[List["VerificationRun"]] = relationship(
+        "VerificationRun",
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+
