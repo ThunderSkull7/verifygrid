@@ -224,22 +224,21 @@ def read_xlsx_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tupl
         workbook.close()
 
 
-def preprocess_file_data(
+def extract_dataset_records(
     file_path: Path,
     file_type: str,
     config: Optional[PreprocessingConfig] = None,
-) -> Tuple[List[ColumnMetadata], Dict[str, str], List[Dict[str, Any]], List[List[int]], List[int], List[ValidationIssue], int, int]:
+) -> Tuple[List[Tuple[int, Dict[str, Any]]], List[ColumnMetadata], Dict[str, str], List[List[int]], List[int], List[ValidationIssue], int]:
     """
-    Core parsing, cleaning, and normalization logic.
+    Core parsing, cleaning, and normalization logic returning all processed records.
     Returns:
+        - processed_records: List of (source_row_num, record_dict)
         - columns_metadata: List[ColumnMetadata]
         - column_mapping: Dict[orig_name, normalized_name]
-        - normalized_preview: List[dict] (first 10 normalized rows with source_row_number)
         - duplicate_record_row_numbers: List[List[int]] (groups of row numbers with identical records)
         - empty_row_numbers: List[int]
         - issues: List[ValidationIssue]
         - total_source_rows: int
-        - data_rows_count: int
     """
     if config is None:
         config = PreprocessingConfig()
@@ -261,7 +260,7 @@ def preprocess_file_data(
     # If fatal error reading headers or file
     has_fatal_error = any(issue.level == "error" for issue in issues)
     if has_fatal_error or not raw_headers:
-        return [], {}, [], [], [], issues, 0, 0
+        return [], [], {}, [], [], issues, 0
 
     if config.strip_whitespace:
         raw_headers = [str(clean_whitespace(h)) for h in raw_headers]
@@ -475,12 +474,50 @@ def preprocess_file_data(
             )
         )
 
-    # 6. Preview rows (first 10 records with source_row_number)
+    total_source_rows = len(data_rows) + 1  # data rows + header
+    return (
+        processed_records,
+        columns_metadata,
+        column_mapping,
+        duplicate_record_row_numbers,
+        empty_row_numbers,
+        issues,
+        total_source_rows,
+    )
+
+
+def preprocess_file_data(
+    file_path: Path,
+    file_type: str,
+    config: Optional[PreprocessingConfig] = None,
+) -> Tuple[List[ColumnMetadata], Dict[str, str], List[Dict[str, Any]], List[List[int]], List[int], List[ValidationIssue], int, int]:
+    """
+    Core parsing, cleaning, and normalization logic returning preview rows.
+    Returns:
+        - columns_metadata: List[ColumnMetadata]
+        - column_mapping: Dict[orig_name, normalized_name]
+        - normalized_preview: List[dict] (first 10 normalized rows with source_row_number)
+        - duplicate_record_row_numbers: List[List[int]] (groups of row numbers with identical records)
+        - empty_row_numbers: List[int]
+        - issues: List[ValidationIssue]
+        - total_source_rows: int
+        - data_rows_count: int
+    """
+    (
+        processed_records,
+        columns_metadata,
+        column_mapping,
+        duplicate_record_row_numbers,
+        empty_row_numbers,
+        issues,
+        total_source_rows,
+    ) = extract_dataset_records(file_path=file_path, file_type=file_type, config=config)
+
+    # Preview rows (first 10 records with source_row_number)
     normalized_preview = [
         {"source_row_number": row_num, **rec} for row_num, rec in processed_records[:10]
     ]
 
-    total_source_rows = len(data_rows) + 1  # data rows + header
     return (
         columns_metadata,
         column_mapping,

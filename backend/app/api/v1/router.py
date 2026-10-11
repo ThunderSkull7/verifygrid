@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.api.v1.endpoints.projects import router as projects_router
 from app.api.v1.endpoints.uploads import router as uploads_router
 from app.api.v1.endpoints.preprocessing import router as preprocessing_router
+from app.api.v1.endpoints.verification import router as verification_router
 
 logger = logging.getLogger(__name__)
 
@@ -54,3 +55,5 @@ def health_check_db(db: Session = Depends(get_db)):
 api_router.include_router(projects_router, prefix="/projects", tags=["Projects"])
 api_router.include_router(uploads_router, tags=["Uploads"])
 api_router.include_router(preprocessing_router, tags=["Preprocessing"])
+api_router.include_router(verification_router, tags=["Verification"])
+

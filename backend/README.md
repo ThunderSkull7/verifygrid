@@ -17,7 +17,7 @@ VerifyGrid is an intelligent data verification and reconciliation platform desig
 
 ## 2. Directory Structure
 
-```
+```text
 backend/
 ├── app/
 │   ├── api/
@@ -25,7 +25,8 @@ backend/
 │   │       ├── endpoints/
 │   │       │   ├── projects.py         # Project management endpoints
 │   │       │   ├── uploads.py          # CSV/XLSX file upload endpoints
-│   │       │   └── preprocessing.py    # Preprocessing & normalization endpoints
+│   │       │   ├── preprocessing.py    # Preprocessing & normalization endpoints
+│   │       │   └── verification.py     # Verification & reconciliation endpoints
 │   │       └── router.py               # API v1 router registration & health checks
 │   ├── core/
 │   │   └── config.py                   # Application settings & environment config
@@ -33,11 +34,12 @@ backend/
 │   │   ├── base.py                     # SQLAlchemy DeclarativeBase
 │   │   └── session.py                  # Database engine & sessionmaker
 │   ├── models/                         # SQLAlchemy models (User, Project, SourceFile)
-│   ├── schemas/                        # Pydantic schemas (Project, Upload, Preprocessing)
+│   ├── schemas/                        # Pydantic schemas (Project, Upload, Preprocessing, Result)
 │   ├── services/
 │   │   ├── ingestion.py                # File upload storage & validation
 │   │   ├── preprocessing.py            # Preprocessing & normalization pipeline
-│   │   └── project_service.py          # Project business logic
+│   │   ├── project_service.py          # Project business logic
+│   │   └── verification_engine.py      # Core verification & reconciliation engine
 │   └── utils/
 │       └── normalization.py            # Column, number, date, and string cleaners
 ├── migrations/                         # Alembic database migrations
@@ -111,6 +113,9 @@ backend/
 
 ### Preprocessing & Normalization
 - `POST /api/v1/projects/{project_id}/files/{file_id}/preprocess` — Trigger preprocessing and normalization on an uploaded file with optional configuration rules.
+
+### Verification & Reconciliation
+- `POST /api/v1/projects/{project_id}/verify` — Execute the core verification engine comparing two project source files across single or composite keys, detecting matches, missing records, duplicate keys, and field-level discrepancies.
 
 ---
 
@@ -250,7 +255,123 @@ The preprocessing layer standardizes raw datasets before ingestion into the veri
 
 ---
 
-## 6. Running Tests
+## 6. Core Verification Engine
+
+The verification engine performs reconciliation between two preprocessed datasets (e.g. source/baseline vs. target/comparison).
+
+### Key Features
+
+1. **Deterministic Record Matching**:
+   - Matches records using single keys or composite multi-column keys (`key_columns: ["dept", "emp_id"]`).
+   - Resolves columns case-insensitively and through snake_case normalization.
+   - Supports explicit column name remapping (`column_mapping: {"src_col": "tgt_col"}`).
+
+2. **Strict Duplicate Key Detection**:
+   - Detects duplicate keys on either or both sides (`DUPLICATE_KEY_SOURCE`, `DUPLICATE_KEY_TARGET`, `DUPLICATE_KEY_BOTH`, `AMBIGUOUS_DUPLICATE`).
+   - **Never silently discards duplicate records** or assumes the first match is correct.
+   - Preserves and reports all source and target row numbers (`source_row_numbers: [2, 5]`).
+
+3. **Field-Level Comparison**:
+   - Compares corresponding fields across matched records.
+   - Evaluates null equivalence consistently (e.g., `None` and `""` or `"N/A"` are equal nulls).
+   - Preserves identifiers with leading zeros (e.g., `"00123"` is not coerced to `123`).
+   - Normalizes numbers, currency symbols, and accounting formats.
+   - Supports configurable `numeric_tolerance` for floating-point values.
+   - Supports whitespace stripping and case-insensitive comparison (`ignore_whitespace`, `ignore_case`).
+
+4. **Summary Metrics & Discrepancy Accounting**:
+   - Calculates mutually exclusive and internally consistent counts across all records on both sides:
+     - `matched_records` (`identical_matches` + `field_mismatches`)
+     - `unmatched_source_records` (present only in source)
+     - `unmatched_target_records` (present only in target)
+     - `duplicate_source_records` & `duplicate_target_records`
+     - `duplicate_source_keys_count` & `duplicate_target_keys_count`
+     - `total_discrepancies`
+
+### Request Example (`POST /api/v1/projects/{project_id}/verify`)
+
+```json
+{
+  "source_file_id": "8c37d0da-514e-4f76-9057-a5ec0902f232",
+  "target_file_id": "e21b7e61-9c17-48f1-8cb5-e51c8a4eb482",
+  "key_columns": ["employee_id"],
+  "column_mapping": {
+    "employee_id": "emp_no",
+    "salary": "base_pay"
+  },
+  "compare_columns": ["salary", "department"],
+  "ignore_columns": ["internal_notes"],
+  "numeric_tolerance": 0.01,
+  "ignore_whitespace": true,
+  "ignore_case": false,
+  "include_identical": true
+}
+```
+
+### Response Example
+
+```json
+{
+  "project_id": "b96874eb-3146-4c28-98e3-bbef08542c3d",
+  "source_file_id": "8c37d0da-514e-4f76-9057-a5ec0902f232",
+  "target_file_id": "e21b7e61-9c17-48f1-8cb5-e51c8a4eb482",
+  "key_columns": ["employee_id"],
+  "column_mapping": {
+    "employee_id": "emp_no",
+    "salary": "base_pay"
+  },
+  "summary": {
+    "total_source_records": 100,
+    "total_target_records": 102,
+    "matched_records": 95,
+    "identical_matches": 90,
+    "field_mismatches": 5,
+    "records_with_differences": 5,
+    "unmatched_source_records": 3,
+    "unmatched_target_records": 4,
+    "duplicate_source_records": 2,
+    "duplicate_target_records": 3,
+    "duplicate_source_keys_count": 1,
+    "duplicate_target_keys_count": 1,
+    "conflicting_duplicate_records": 0,
+    "total_discrepancies": 14,
+    "status": "completed"
+  },
+  "results": [],
+  "discrepancies": [
+    {
+      "key_values": {"employee_id": "00102"},
+      "match_status": "field_mismatch",
+      "discrepancy_category": "field_mismatch",
+      "source_row_number": 3,
+      "target_row_number": 4,
+      "field_differences": [
+        {
+          "field_name": "salary",
+          "source_field": "salary",
+          "target_field": "base_pay",
+          "source_value": 60000,
+          "target_value": 65000,
+          "difference_type": "value_mismatch",
+          "message": "Difference in 'salary': '60000' vs '65000'"
+        }
+      ]
+    }
+  ],
+  "warnings": [],
+  "errors": []
+}
+```
+
+### Limitations
+
+- **Fuzzy Matching**: Key matching is exact (with whitespace/case normalization). Approximate/fuzzy string matching is deferred to a future milestone.
+- **AI-Based Reconciliation**: Automatic semantic column inference and AI-assisted match resolution are intentionally out of scope for this milestone.
+- **Persistent Verification Runs**: Verification is executed on-demand in-memory. Persistent storage of verification runs and historical reconciliation audits will be implemented in the next milestone.
+
+---
+
+## 7. Running Tests
 
 Execute the automated test suite with `pytest`:
 
@@ -258,9 +379,10 @@ Execute the automated test suite with `pytest`:
 # Run all tests
 pytest tests/ -v
 
-# Run only preprocessing tests
-pytest tests/test_preprocessing.py -v
+# Run verification engine tests
+pytest tests/test_verification_engine.py -v
 
 # Run with python module syntax
 python -m pytest tests/ -v
 ```
+

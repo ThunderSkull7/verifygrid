@@ -8,6 +8,16 @@ from app.schemas.preprocessing import (
     PreprocessingResultResponse,
     ValidationIssue,
 )
+from app.schemas.result import (
+    DiscrepancyCategory,
+    FieldDifference,
+    InMemoryVerificationRequest,
+    MatchStatus,
+    VerificationRequest,
+    VerificationResponse,
+    VerificationResultItem,
+    VerificationSummary,
+)
 
 __all__ = [
     "ProjectBase",
@@ -18,4 +28,13 @@ __all__ = [
     "PreprocessingConfig",
     "PreprocessingResultResponse",
     "ValidationIssue",
+    "MatchStatus",
+    "DiscrepancyCategory",
+    "FieldDifference",
+    "VerificationResultItem",
+    "VerificationSummary",
+    "VerificationRequest",
+    "InMemoryVerificationRequest",
+    "VerificationResponse",
 ]
+
