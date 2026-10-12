@@ -1,0 +1,6 @@
+id,name,amount,status
+101,Acme Corp,1500.50,active
+102,Beta LLC,2400.00,pending
+103,Gamma Inc,850.75,active
+104,Delta Co,3100.20,active
+105,Epsilon Ltd,950.00,closed
