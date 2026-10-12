@@ -18,6 +18,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
+from app.models.user import User
 from app.models.verification_run import VerificationRun, VerificationDiscrepancy
 from app.services.verification_engine import get_verification_run
 
@@ -208,6 +209,50 @@ def generate_xlsx_report(
     return out.getvalue()
 
 
+def generate_json_report(
+    run: VerificationRun,
+    discrepancies: List[VerificationDiscrepancy],
+) -> bytes:
+    """Generate a clean JSON report containing run metadata, summary, and discrepancies."""
+    data = {
+        "report_type": "VerifyGrid Verification Report",
+        "run": {
+            "id": str(run.id),
+            "project_id": str(run.project_id),
+            "source_file_id": str(run.source_file_id) if run.source_file_id else None,
+            "target_file_id": str(run.target_file_id) if run.target_file_id else None,
+            "status": run.status,
+            "key_columns": run.key_columns or [],
+            "column_mapping": run.column_mapping or {},
+            "configuration": run.configuration or {},
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+            "error_message": run.error_message,
+        },
+        "summary": run.summary or {},
+        "discrepancies_count": len(discrepancies),
+        "discrepancies": [
+            {
+                "id": str(item.id),
+                "match_status": item.match_status,
+                "discrepancy_category": item.discrepancy_category,
+                "key_values": item.key_values,
+                "source_row_number": item.source_row_number,
+                "target_row_number": item.target_row_number,
+                "source_row_numbers": item.source_row_numbers,
+                "target_row_numbers": item.target_row_numbers,
+                "source_record": item.source_record,
+                "target_record": item.target_record,
+                "field_differences": item.field_differences,
+                "message": item.message,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+            }
+            for item in discrepancies
+        ],
+    }
+    return json.dumps(data, indent=2).encode("utf-8")
+
+
 def export_verification_report(
     db: Session,
     project_id: uuid.UUID,
@@ -215,20 +260,29 @@ def export_verification_report(
     report_format: str = "csv",
     discrepancy_category: Optional[str] = None,
     match_status: Optional[str] = None,
+    current_user: Optional[User] = None,
 ) -> Tuple[bytes, str, str]:
     """
     Generate downloadable report file bytes, MIME type, and safe filename.
     Validates project authorization, run ID, and export format.
+    Ensures run is completed before export.
     """
     clean_format = report_format.strip().lower()
-    if clean_format not in ["csv", "xlsx"]:
+    if clean_format not in ["csv", "json", "xlsx"]:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unsupported export format '{report_format}'. Supported formats are 'csv' and 'xlsx'.",
+            detail=f"Unsupported export format '{report_format}'. Supported formats are 'csv', 'json', and 'xlsx'.",
         )
 
     # 1. Authorize project & fetch run
-    run = get_verification_run(db, project_id, run_id)
+    run = get_verification_run(db, project_id, run_id, current_user=current_user)
+
+    # Validate run state
+    if run.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot export verification run in '{run.status}' state. Only completed runs can be exported.",
+        )
 
     # 2. Query discrepancies with optional filters
     query = db.query(VerificationDiscrepancy).filter(VerificationDiscrepancy.run_id == run_id)
@@ -251,6 +305,10 @@ def export_verification_report(
         content = generate_csv_report(run, discrepancies)
         media_type = "text/csv"
         filename = _safe_filename("verification_report", str(run.id), "csv")
+    elif clean_format == "json":
+        content = generate_json_report(run, discrepancies)
+        media_type = "application/json"
+        filename = _safe_filename("verification_report", str(run.id), "json")
     else:
         content = generate_xlsx_report(run, discrepancies)
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

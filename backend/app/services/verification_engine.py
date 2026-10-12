@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.source_file import SourceFile
+from app.models.user import User
 from app.models.verification_run import VerificationRun, VerificationDiscrepancy
 from app.schemas.preprocessing import ColumnMetadata, PreprocessingConfig, ValidationIssue
 from app.schemas.result import (
@@ -694,6 +695,7 @@ def verify_project_files(
     db: Session,
     project_id: uuid.UUID,
     request: VerificationRequest,
+    current_user: Optional[User] = None,
 ) -> VerificationResponse:
     """
     Execute full verification between two uploaded source files belonging to a project.
@@ -701,7 +703,7 @@ def verify_project_files(
     datasets, and runs core comparison engine.
     """
     # 1. Project existence & authorization check
-    project = get_project_by_id(db, project_id)
+    project = get_project_by_id(db, project_id, current_user=current_user)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -812,13 +814,14 @@ def create_and_execute_verification_run(
     db: Session,
     project_id: uuid.UUID,
     request: VerificationRequest,
+    current_user: Optional[User] = None,
 ) -> VerificationRun:
     """
     Create a persistent VerificationRun record, execute reconciliation,
     store summary metrics and individual discrepancy items in a safe transaction.
     """
     # 1. Project existence & authorization check
-    project = get_project_by_id(db, project_id)
+    project = get_project_by_id(db, project_id, current_user=current_user)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -978,9 +981,10 @@ def get_verification_run(
     db: Session,
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    current_user: Optional[User] = None,
 ) -> VerificationRun:
     """Retrieve a verification run with project authorization check."""
-    project = get_project_by_id(db, project_id)
+    project = get_project_by_id(db, project_id, current_user=current_user)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1002,12 +1006,13 @@ def get_verification_run(
 def list_verification_runs(
     db: Session,
     project_id: uuid.UUID,
+    current_user: Optional[User] = None,
     skip: int = 0,
     limit: int = 20,
     status_filter: Optional[str] = None,
 ) -> Tuple[int, List[VerificationRun]]:
     """List verification runs for a project with pagination and status filtering."""
-    project = get_project_by_id(db, project_id)
+    project = get_project_by_id(db, project_id, current_user=current_user)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1027,6 +1032,7 @@ def list_run_discrepancies(
     db: Session,
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    current_user: Optional[User] = None,
     skip: int = 0,
     limit: int = 50,
     discrepancy_category: Optional[str] = None,
@@ -1036,7 +1042,7 @@ def list_run_discrepancies(
 ) -> Tuple[int, List[VerificationDiscrepancy]]:
     """Paginate, filter, and sort discrepancy results for an authorized verification run."""
     # Enforce project ownership
-    get_verification_run(db, project_id, run_id)
+    get_verification_run(db, project_id, run_id, current_user=current_user)
 
     valid_sort_fields = {
         "source_row_number": VerificationDiscrepancy.source_row_number,
@@ -1083,9 +1089,10 @@ def get_verification_run_summary(
     db: Session,
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    current_user: Optional[User] = None,
 ) -> Dict[str, Any]:
     """Retrieve only the summary metrics for an authorized verification run."""
-    run = get_verification_run(db, project_id, run_id)
+    run = get_verification_run(db, project_id, run_id, current_user=current_user)
     return run.summary or {}
 
 

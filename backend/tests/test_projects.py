@@ -2,7 +2,7 @@ import uuid
 from fastapi.testclient import TestClient
 
 
-def test_create_project_success(client: TestClient):
+def test_create_project_success(client: TestClient, default_user):
     """
     Test creating a project with valid name and description.
     """
@@ -20,12 +20,12 @@ def test_create_project_success(client: TestClient):
     assert project_id is not None
     assert data["name"] == "Audit Run 2026"
     assert data["description"] == "Financial reconciliation dataset"
-    assert data["owner_id"] is None
+    assert data["owner_id"] == str(default_user.id)
     assert "created_at" in data
     assert "updated_at" in data
 
 
-def test_create_project_without_description(client: TestClient):
+def test_create_project_without_description(client: TestClient, default_user):
     """
     Test creating a project with only the required name field.
     """
@@ -35,7 +35,7 @@ def test_create_project_without_description(client: TestClient):
     data = response.json()
     assert data["name"] == "Minimal Project"
     assert data["description"] is None
-    assert data["owner_id"] is None
+    assert data["owner_id"] == str(default_user.id)
 
 
 def test_create_project_validation_missing_name(client: TestClient):
@@ -56,10 +56,10 @@ def test_create_project_validation_empty_name(client: TestClient):
     assert response.status_code == 422
 
 
-def test_create_project_ignores_injected_owner_id(client: TestClient):
+def test_create_project_ignores_injected_owner_id(client: TestClient, default_user):
     """
     Security check: verify that client-injected owner_id values are not used.
-    In this development stage prior to authentication, owner_id must remain None.
+    owner_id must always be derived directly from the authenticated principal.
     """
     fake_user_id = str(uuid.uuid4())
     payload = {
@@ -69,7 +69,7 @@ def test_create_project_ignores_injected_owner_id(client: TestClient):
     response = client.post("/api/v1/projects", json=payload)
     assert response.status_code == 201
     data = response.json()
-    assert data["owner_id"] is None
+    assert data["owner_id"] == str(default_user.id)
 
 
 def test_list_projects(client: TestClient):

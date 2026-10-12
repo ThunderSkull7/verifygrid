@@ -194,3 +194,90 @@ def test_discrepancies_sorting_and_validation(client: TestClient, upload_storage
     )
     assert invalid_res.status_code == 422
     assert "Invalid sort_by" in invalid_res.json()["detail"]
+
+
+def test_export_json_report(client: TestClient, upload_storage: Path):
+    project_id = create_project(client, "JSON Export Project")
+    run_id = create_test_run(client, project_id)
+
+    res = client.get(f"/api/v1/projects/{project_id}/runs/{run_id}/export?format=json")
+    assert res.status_code == 200
+    assert "application/json" in res.headers["content-type"]
+    assert f"attachment; filename=\"verification_report_{run_id}.json\"" in res.headers["content-disposition"]
+
+    data = res.json()
+    assert data["report_type"] == "VerifyGrid Verification Report"
+    assert data["run"]["id"] == run_id
+    assert data["run"]["status"] == "completed"
+    assert data["summary"]["matched_records"] == 2
+    assert data["discrepancies_count"] == 3
+    assert len(data["discrepancies"]) == 3
+    # Check fields of discrepancy items
+    item = data["discrepancies"][0]
+    assert "id" in item
+    assert "match_status" in item
+    assert "discrepancy_category" in item
+    assert "key_values" in item
+
+
+def test_export_json_empty_discrepancies(client: TestClient, upload_storage: Path):
+    project_id = create_project(client, "JSON Clean Project")
+    csv_bytes = "id,val\n1,A\n".encode("utf-8")
+    f1 = upload_file(client, project_id, "clean.csv", csv_bytes)
+
+    run_res = client.post(
+        f"/api/v1/projects/{project_id}/runs",
+        json={
+            "source_file_id": f1["id"],
+            "target_file_id": f1["id"],
+            "key_columns": ["id"],
+        },
+    )
+    assert run_res.status_code == 201
+    run_id = run_res.json()["id"]
+
+    res = client.get(f"/api/v1/projects/{project_id}/runs/{run_id}/export?format=json")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["discrepancies_count"] == 0
+    assert data["discrepancies"] == []
+
+
+def test_export_missing_run_returns_404(client: TestClient, upload_storage: Path):
+    project_id = create_project(client, "Missing Run Project")
+    fake_run_id = str(uuid.uuid4())
+
+    res = client.get(f"/api/v1/projects/{project_id}/runs/{fake_run_id}/export?format=csv")
+    assert res.status_code == 404
+    assert "Verification run not found" in res.json()["detail"]
+
+
+def test_export_incomplete_run_returns_400(client: TestClient, upload_storage: Path):
+    project_id = create_project(client, "Incomplete Run Project")
+    csv_bytes = "id,name\n1,Alice\n".encode("utf-8")
+    f1 = upload_file(client, project_id, "f1.csv", csv_bytes)
+
+    # Creating a run with an invalid key column results in status="failed"
+    fail_res = client.post(
+        f"/api/v1/projects/{project_id}/runs",
+        json={
+            "source_file_id": f1["id"],
+            "target_file_id": f1["id"],
+            "key_columns": ["invalid_col"],
+        },
+    )
+    assert fail_res.status_code == 422
+
+    # Query the runs list to find the failed run's ID
+    list_res = client.get(f"/api/v1/projects/{project_id}/runs")
+    assert list_res.status_code == 200
+    runs = list_res.json()["items"]
+    assert len(runs) == 1
+    failed_run_id = runs[0]["id"]
+    assert runs[0]["status"] == "failed"
+
+    # Attempt export of the failed run -> 400 Bad Request
+    export_res = client.get(f"/api/v1/projects/{project_id}/runs/{failed_run_id}/export?format=csv")
+    assert export_res.status_code == 400
+    assert "Cannot export verification run in 'failed' state" in export_res.json()["detail"]
+

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.source_file import SourceFile
+from app.models.user import User
 from app.schemas.preprocessing import (
     ColumnMetadata,
     PreprocessingConfig,
@@ -535,6 +536,7 @@ def preprocess_source_file(
     project_id: uuid.UUID,
     file_id: uuid.UUID,
     config: Optional[PreprocessingConfig] = None,
+    current_user: Optional[User] = None,
 ) -> PreprocessingResultResponse:
     """
     Execute preprocessing for an uploaded file belonging to a project.
@@ -542,7 +544,7 @@ def preprocess_source_file(
     and updates SourceFile record status.
     """
     # 1. Project verification
-    project = get_project_by_id(db, project_id)
+    project = get_project_by_id(db, project_id, current_user=current_user)
     if project is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

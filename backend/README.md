@@ -117,14 +117,15 @@ backend/
 ### Verification & Reconciliation
 - `POST /api/v1/projects/{project_id}/verify` — Execute the in-memory core verification engine comparing two project source files across single or composite keys, detecting matches, missing records, duplicate keys, and field-level discrepancies.
 - `POST /api/v1/projects/{project_id}/runs` — Create and execute a persistent verification run, storing run status, summary metrics, and discrepancies.
-- `GET /api/v1/projects/{project_id}/runs` — List verification runs for a project with pagination and status filtering.
-- `GET /api/v1/projects/{project_id}/runs/{run_id}` — Retrieve details and summary metrics for a specific verification run.
+- `GET /api/v1/projects/{project_id}/runs?skip=0&limit=20&status=completed` — List verification runs for a project with pagination and status filtering.
+- `GET /api/v1/projects/{project_id}/runs/{run_id}` — Retrieve details, configuration, status, and summary metrics for a specific verification run.
 - `GET /api/v1/projects/{project_id}/runs/{run_id}/summary` — Retrieve summary metrics dictionary for a specific verification run.
-- `GET /api/v1/projects/{project_id}/runs/{run_id}/results` — Paginate, filter, and sort discrepancy results for a verification run.
+- `GET /api/v1/projects/{project_id}/runs/{run_id}/results?skip=0&limit=50&discrepancy_category=field_mismatch&match_status=field_mismatch&sort_by=source_row_number&sort_order=asc` — Paginate, filter, and sort discrepancy results for a verification run.
 
 ### Reports & Exports
-- `GET /api/v1/projects/{project_id}/runs/{run_id}/export?format=csv` — Download verification report as a structured CSV file.
-- `GET /api/v1/projects/{project_id}/runs/{run_id}/export?format=xlsx` — Download verification report as a formatted multi-sheet Excel spreadsheet.
+- `GET /api/v1/projects/{project_id}/runs/{run_id}/export?format=csv` — Download verification report as a structured CSV file with summary metadata headers and discrepancy rows.
+- `GET /api/v1/projects/{project_id}/runs/{run_id}/export?format=json` — Download verification report as structured JSON with full run metadata, metrics, and discrepancies.
+- `GET /api/v1/projects/{project_id}/runs/{run_id}/export?format=xlsx` — Download verification report as a formatted multi-sheet Excel spreadsheet (Summary and Discrepancies sheets).
 
 
 ---

@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     storage_root: Path = Path("storage/uploads")
     max_upload_bytes: int = 25 * 1024 * 1024
 
+    # Authentication & Security
+    secret_key: str = "verifygrid-default-insecure-secret-key-change-in-production-12345"
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60 * 24  # 24 hours
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
