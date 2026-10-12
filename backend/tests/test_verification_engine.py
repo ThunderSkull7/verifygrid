@@ -593,3 +593,111 @@ def test_api_verify_file_against_itself(client: TestClient, upload_storage: Path
     assert data["summary"]["identical_matches"] == 2
     assert data["summary"]["total_discrepancies"] == 0
 
+
+def test_verify_preserves_original_values_in_reporting():
+    source = [
+        (1, {"id": "REC-01", "raw_text": "  Unpadded Source  ", "amount": 100.50}),
+    ]
+    target = [
+        (1, {"id": "REC-01", "raw_text": "  Unpadded Target  ", "amount": 100.75}),
+    ]
+
+    summary, results, discrepancies, warnings, errors = verify_datasets(
+        source_records=source,
+        target_records=target,
+        key_columns=["id"],
+    )
+
+    assert summary.field_mismatches == 1
+    assert len(discrepancies) == 1
+    disc = discrepancies[0]
+    diff_map = {d.field_name: d for d in disc.field_differences}
+
+    assert diff_map["raw_text"].source_value == "  Unpadded Source  "
+    assert diff_map["raw_text"].target_value == "  Unpadded Target  "
+    assert diff_map["amount"].source_value == 100.50
+    assert diff_map["amount"].target_value == 100.75
+
+
+def test_api_verify_empty_file_handling(client: TestClient, upload_storage: Path):
+    proj = create_project(client, "Empty Files Verification Project")
+    empty_csv = b""
+    valid_csv = "id,name\n1,Alpha\n".encode("utf-8")
+
+    f_empty = upload_file(client, proj, "empty.csv", empty_csv)
+    f_valid = upload_file(client, proj, "valid.csv", valid_csv)
+
+    # Empty source file vs valid target file
+    payload = {
+        "source_file_id": f_empty["id"],
+        "target_file_id": f_valid["id"],
+        "key_columns": ["id"],
+    }
+    response = client.post(f"/api/v1/projects/{proj}/verify", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["summary"]["total_source_records"] == 0
+    assert data["summary"]["total_target_records"] == 1
+    assert data["summary"]["unmatched_target_records"] == 1
+    assert any("empty" in str(w["message"]).lower() for w in data["warnings"])
+
+    # Both empty files
+    payload_both_empty = {
+        "source_file_id": f_empty["id"],
+        "target_file_id": f_empty["id"],
+        "key_columns": ["id"],
+    }
+    response_both = client.post(f"/api/v1/projects/{proj}/verify", json=payload_both_empty)
+    assert response_both.status_code == 200
+    data_both = response_both.json()
+    assert data_both["summary"]["total_source_records"] == 0
+    assert data_both["summary"]["total_target_records"] == 0
+    assert data_both["summary"]["total_discrepancies"] == 0
+
+
+def test_api_verify_duplicate_headers_handling(client: TestClient, upload_storage: Path):
+    proj = create_project(client, "Duplicate Headers Project")
+    # CSV with duplicate header "metric"
+    csv_dup_header = "id,metric,metric\n1,100,200\n".encode("utf-8")
+    csv_normal = "id,metric,metric_1\n1,100,200\n".encode("utf-8")
+
+    f_dup = upload_file(client, proj, "dup_header.csv", csv_dup_header)
+    f_normal = upload_file(client, proj, "normal.csv", csv_normal)
+
+    payload = {
+        "source_file_id": f_dup["id"],
+        "target_file_id": f_normal["id"],
+        "key_columns": ["id"],
+    }
+    response = client.post(f"/api/v1/projects/{proj}/verify", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["summary"]["matched_records"] == 1
+    assert data["summary"]["identical_matches"] == 1
+    # Check that warning about duplicate header was reported
+    assert any(w["issue_type"] == "duplicate_header" for w in data["warnings"])
+
+
+def test_verify_composite_keys_with_partial_null():
+    source = [
+        (1, {"tenant": "T1", "user_id": None, "role": "admin"}),
+        (2, {"tenant": "T1", "user_id": "U100", "role": "viewer"}),
+    ]
+    target = [
+        (1, {"tenant": "T1", "user_id": "U100", "role": "viewer"}),
+        (2, {"tenant": "T1", "user_id": "U200", "role": "editor"}),
+    ]
+
+    summary, results, discrepancies, warnings, errors = verify_datasets(
+        source_records=source,
+        target_records=target,
+        key_columns=["tenant", "user_id"],
+    )
+
+    assert summary.matched_records == 1
+    assert summary.identical_matches == 1  # (T1, U100)
+    assert summary.unmatched_source_records == 1  # (T1, None)
+    assert summary.unmatched_target_records == 1  # (T1, U200)
+    assert any(w.issue_type == "null_key" for w in warnings)
+
+
