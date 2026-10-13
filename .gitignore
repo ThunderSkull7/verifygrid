@@ -4,8 +4,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
-storage/*
-!.gitkeep
+backend/storage/uploads/
+storage/
 .pytest_cache/
 .mypy_cache/
 .idea/
