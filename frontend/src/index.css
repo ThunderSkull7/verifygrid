@@ -47,13 +47,22 @@
   padding: 0;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
 body {
   font-family: var(--font-family);
   background-color: var(--bg-primary);
   color: var(--text-main);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
-  min-height: 100vh;
 }
 
 button {
@@ -77,14 +86,20 @@ a {
 /* App Shell */
 .app-container {
   display: flex;
-  height: 100vh;
+  width: 100%;
+  height: 100%;
   height: 100dvh;
+  position: relative;
   overflow: hidden;
 }
 
 .sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
   width: 260px;
   height: 100%;
+  height: 100dvh;
   background-color: var(--bg-secondary);
   border-right: 1px solid var(--border-color);
   display: flex;
@@ -92,6 +107,7 @@ a {
   padding: 24px 16px;
   flex-shrink: 0;
   overflow-y: auto;
+  z-index: 100;
 }
 
 .sidebar-brand {
@@ -212,9 +228,12 @@ a {
   flex: 1;
   display: flex;
   flex-direction: column;
+  margin-left: 260px;
+  width: calc(100% - 260px);
   min-width: 0;
   min-height: 0;
   height: 100%;
+  height: 100dvh;
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -526,15 +545,25 @@ a {
 
 /* Responsive Layout */
 @media (max-width: 768px) {
+  html,
+  body,
+  #root {
+    overflow-y: auto;
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
   .app-container {
     flex-direction: column;
     height: auto;
     min-height: 100vh;
     min-height: 100dvh;
-    overflow-y: auto;
+    overflow-y: visible;
   }
 
   .sidebar {
+    position: static;
     width: 100%;
     height: auto;
     border-right: none;
@@ -544,6 +573,8 @@ a {
   }
 
   .main-wrapper {
+    margin-left: 0;
+    width: 100%;
     height: auto;
     overflow-y: visible;
   }
