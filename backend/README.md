@@ -6,7 +6,7 @@ VerifyGrid Backend is a high-performance, deterministic data verification and re
 
 ## 1. Architectural Overview
 
-```
+```text
                       +-----------------------------------+
                       |         FastAPI REST API          |
                       |   (/api/v1 - Auth, Projects,      |
@@ -105,12 +105,14 @@ backend/
 ## 4. How the Backend Works
 
 ### 4.1 Authentication & Authorization
+
 - Endpoints under `/api/v1/auth` handle user registration (`/register`) and login (`/login`).
 - Passwords are encrypted using bcrypt.
 - Successful authentication returns a JWT bearer token signed with HS256.
 - A FastAPI dependency (`get_current_user`) extracts and validates the bearer token from the `Authorization: Bearer <token>` header on protected routes.
 
 ### 4.2 Project & File Ingestion Workflow
+
 1. Users create a project workspace via `POST /api/v1/projects`.
 2. Users upload source datasets via `POST /api/v1/projects/{project_id}/files`.
 3. Ingestion validation verifies:
@@ -120,7 +122,9 @@ backend/
 4. Files are stored in `storage/uploads/{project_id}/` with UUID filenames, preserving original filenames in the `source_files` database record.
 
 ### 4.3 Data Preprocessing & Profiling Pipeline
+
 Triggered via `POST /api/v1/projects/{project_id}/files/{file_id}/preprocess`.
+
 1. **Encoding Detection & Decoding**: Attempts `utf-8-sig` (BOM), `utf-8`, `cp1252`, and `latin-1` with automatic delimiter sniffing (`,` `\t`, `;`, `|`).
 2. **Header Normalization**: Headers are trimmed, lowercased, converted to `snake_case`, and deduplicated with indexed suffixes (e.g., `id`, `id_1`).
 3. **Data Type Profiling & Coercion**:
@@ -131,7 +135,9 @@ Triggered via `POST /api/v1/projects/{project_id}/files/{file_id}/preprocess`.
 4. **Anomaly Tracking**: Identifies empty rows and duplicate records, returning structured column profiles and preview rows.
 
 ### 4.4 Verification & Reconciliation Engine
+
 The engine (`app/services/verification_engine.py`) performs deterministic reconciliation:
+
 - **Key Resolution**: Supports single or composite keys (`key_columns: ["dept", "emp_id"]`) with case-insensitive column matching and optional explicit remapping (`column_mapping`).
 - **Duplicate Key Guardrails**: Explicitly tags duplicate records as `DUPLICATE_KEY_SOURCE`, `DUPLICATE_KEY_TARGET`, `DUPLICATE_KEY_BOTH`, or `AMBIGUOUS_DUPLICATE`. Duplicate records are never silently dropped or arbitrarily matched.
 - **Field-Level Diffing**: Evaluates matched rows across specified compare columns. Applies configurable `numeric_tolerance`, `ignore_whitespace`, and `ignore_case`.
@@ -146,7 +152,9 @@ The engine (`app/services/verification_engine.py`) performs deterministic reconc
   - *Persistent Runs*: `POST /api/v1/projects/{project_id}/runs` executes the reconciliation and persists the run metrics and individual discrepancy items to PostgreSQL.
 
 ### 4.5 Export Service
+
 Users can download reconciliation reports via `GET /api/v1/projects/{project_id}/runs/{run_id}/export`:
+
 - `format=csv`: Exports a CSV report containing summary header metadata followed by discrepancy detail rows.
 - `format=xlsx`: Generates a multi-sheet Excel workbook (`Summary` overview sheet and `Discrepancies` detail sheet).
 - `format=json`: Streams full JSON containing all execution parameters, metrics, and discrepancy items.
@@ -157,7 +165,7 @@ Users can download reconciliation reports via `GET /api/v1/projects/{project_id}
 ## 5. REST API Endpoints Reference
 
 | Method | Path | Description | Protected |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `GET` | `/` | Service root and version info | No |
 | `GET` | `/api/v1/health` | Service liveness health check | No |
 | `GET` | `/api/v1/health/db` | PostgreSQL connectivity health check | No |
@@ -181,29 +189,41 @@ Users can download reconciliation reports via `GET /api/v1/projects/{project_id}
 ## 6. Local Setup & Execution Guide
 
 ### 6.1 Prerequisites
+
 - Python 3.12+
 - PostgreSQL (or local SQLite for unit testing)
 
 ### 6.2 Environment Setup
+
 1. **Navigate to the backend directory**:
+
    ```powershell
    cd backend
    ```
+
 2. **Activate the virtual environment**:
+
    - Windows:
+
      ```powershell
      & ".venv\Scripts\Activate.ps1"
      ```
+
    - Linux/macOS:
+
      ```bash
      source .venv/bin/activate
      ```
+
 3. **Install dependencies**:
+
    ```bash
    pip install -r requirements.txt
    ```
+
 4. **Configure environment variables**:
    Create `.env` based on `.env.example`:
+
    ```ini
    DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/verifygrid
    STORAGE_ROOT=storage/uploads
@@ -211,14 +231,19 @@ Users can download reconciliation reports via `GET /api/v1/projects/{project_id}
    SECRET_KEY=your-secure-secret-key-for-jwt
    ACCESS_TOKEN_EXPIRE_MINUTES=1440
    ```
+
 5. **Run Alembic database migrations**:
+
    ```bash
    alembic upgrade head
    ```
+
 6. **Start the development server**:
+
    ```bash
    uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
+
    Interactive Swagger docs are accessible at: `http://localhost:8000/docs`.
 
 ---
@@ -226,6 +251,7 @@ Users can download reconciliation reports via `GET /api/v1/projects/{project_id}
 ## 7. Running Automated Tests
 
 Run the test suite using `pytest`:
+
 ```bash
 # Run all tests
 pytest tests/ -v
@@ -239,4 +265,5 @@ pytest tests/test_exports.py -v
 # Run authentication and persistence tests
 pytest tests/test_auth.py tests/test_verification_persistence.py -v
 ```
+
 The test suite isolates unit tests using in-memory SQLite fixtures (`sqlite:///:memory:`) configured in `tests/conftest.py`.
