@@ -1,28 +1,41 @@
 import React, { useRef, useState } from 'react';
 import type { Project, SourceFile, PreprocessingResult } from '../types';
 import { api } from '../services/api';
-import { UploadCloud, FileSpreadsheet, CheckCircle, AlertTriangle } from 'lucide-react';
+import {
+  UploadCloud,
+  FileSpreadsheet,
+  AlertTriangle,
+  Check,
+  Database,
+  ListChecks,
+} from 'lucide-react';
 
 interface FileUploadSectionProps {
   project: Project;
   onFileUploaded: (file: SourceFile, profile?: PreprocessingResult) => void;
+  datasets: { id: string; name: string; profile?: PreprocessingResult }[];
 }
 
-export const FileUploadSection: React.FC<FileUploadSectionProps> = ({ project, onFileUploaded }) => {
-  const [uploading, setUploading] = useState(false);
+type UploadPhase = 'idle' | 'uploading' | 'profiling' | 'done';
+
+export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
+  project,
+  onFileUploaded,
+  datasets,
+}) => {
+  const [phase, setPhase] = useState<UploadPhase>('idle');
+  const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUploaded, setLastUploaded] = useState<SourceFile | null>(null);
-  const [profiling, setProfiling] = useState(false);
   const [profileResult, setProfileResult] = useState<PreprocessingResult | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const busy = phase === 'uploading' || phase === 'profiling';
 
+  const handleFile = async (file: File) => {
     setError(null);
-    setUploading(true);
+    setPhase('uploading');
     setProfileResult(null);
 
     try {
@@ -31,20 +44,44 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({ project, o
       setLastUploaded(sourceFile);
 
       // 2. Automatically profile / preprocess file
-      setProfiling(true);
+      setPhase('profiling');
       const preprocessed = await api.preprocessFile(project.id, sourceFile.id);
       setProfileResult(preprocessed);
+      setPhase('done');
 
       onFileUploaded(sourceFile, preprocessed);
     } catch (err: any) {
       setError(err.message || 'File upload or preprocessing failed');
+      setPhase('idle');
     } finally {
-      setUploading(false);
-      setProfiling(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
     }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    void handleFile(file);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragActive(false);
+    if (busy) return;
+    const file = e.dataTransfer.files?.[0];
+    if (file) void handleFile(file);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (!busy) setDragActive(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragActive(false);
   };
 
   return (
@@ -52,7 +89,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({ project, o
       <div className="card-header">
         <div>
           <h3 className="card-title">
-            <UploadCloud size={20} /> Dataset Upload & Preprocessing
+            <UploadCloud size={19} /> Dataset upload &amp; preprocessing
           </h3>
           <p className="card-description">
             Upload CSV or XLSX source files for normalization, schema inference, and verification.
@@ -61,22 +98,28 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({ project, o
       </div>
 
       {error && (
-        <div className="alert-box alert-error">
-          <AlertTriangle size={18} />
+        <div className="alert alert-error" role="alert">
+          <AlertTriangle size={16} />
           <span>{error}</span>
         </div>
       )}
 
       <div
-        style={{
-          border: '2px dashed var(--border-color)',
-          borderRadius: 'var(--radius-md)',
-          padding: '36px 20px',
-          textAlign: 'center',
-          backgroundColor: 'rgba(15, 23, 42, 0.4)',
-          cursor: uploading ? 'wait' : 'pointer',
+        className={`dropzone ${dragActive ? 'dragging' : ''} ${busy ? 'disabled' : ''}`}
+        onClick={() => !busy && fileInputRef.current?.click()}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        role="button"
+        tabIndex={0}
+        aria-label="Upload dataset file"
+        aria-disabled={busy}
+        onKeyDown={(e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && !busy) {
+            e.preventDefault();
+            fileInputRef.current?.click();
+          }
         }}
-        onClick={() => !uploading && fileInputRef.current?.click()}
       >
         <input
           type="file"
@@ -84,96 +127,134 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({ project, o
           accept=".csv,.xlsx,.xls"
           style={{ display: 'none' }}
           onChange={handleFileChange}
-          disabled={uploading}
+          disabled={busy}
         />
-        <UploadCloud size={44} style={{ color: 'var(--primary)', marginBottom: 12 }} />
-        <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: 4 }}>
-          {uploading ? 'Uploading and parsing file...' : 'Choose a CSV or XLSX dataset'}
+        <div className="dropzone-icon">
+          <UploadCloud size={22} />
+        </div>
+        <h4 className="dropzone-title">
+          {phase === 'uploading'
+            ? 'Uploading file…'
+            : phase === 'profiling'
+              ? 'Preprocessing dataset…'
+              : 'Drop a CSV or XLSX file here'}
         </h4>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-          Supports comma-separated files and Excel spreadsheets up to 100,000 rows.
+        <p className="dropzone-hint">
+          or <span className="link-accent">browse local files</span> — up to 100,000 data rows per
+          dataset
         </p>
-        <button
-          type="button"
-          className="btn btn-secondary btn-sm"
-          style={{ marginTop: 16 }}
-          disabled={uploading}
-          onClick={(e) => {
-            e.stopPropagation();
-            fileInputRef.current?.click();
-          }}
-        >
-          {uploading ? 'Processing...' : 'Browse Local Files'}
-        </button>
       </div>
 
-      {profiling && (
-        <div style={{ marginTop: 18, color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-          Running automatic type inference and column normalization...
+      {busy && (
+        <div className="upload-steps" aria-live="polite">
+          <span className={`step-pill ${phase === 'uploading' ? 'active' : 'done'}`}>
+            {phase === 'uploading' ? <span className="spinner" /> : <Check size={13} />}
+            Uploading file
+          </span>
+          <span className={`step-pill ${phase === 'profiling' ? 'active' : 'done'}`}>
+            {phase === 'profiling' ? <span className="spinner" /> : <Check size={13} />}
+            Inferring schema &amp; normalizing
+          </span>
         </div>
       )}
 
       {lastUploaded && profileResult && (
-        <div style={{ marginTop: 24, borderTop: '1px solid var(--border-subtle)', paddingTop: 20 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <FileSpreadsheet size={20} color="var(--accent-emerald)" />
-              <div>
-                <strong style={{ fontSize: '0.95rem' }}>{profileResult.original_filename}</strong>
-                <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginLeft: 8 }}>
-                  ({profileResult.data_rows_count.toLocaleString()} data rows, {profileResult.columns.length} columns)
-                </span>
-              </div>
-            </div>
-            <span className="badge badge-identical" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <CheckCircle size={12} /> Preprocessed
+        <div className="upload-result">
+          <div className="upload-result-head">
+            <FileSpreadsheet size={19} className="text-accent" />
+            <span className="upload-result-name">{profileResult.original_filename}</span>
+            <span className="upload-result-meta">
+              {profileResult.data_rows_count.toLocaleString()} data rows ·{' '}
+              {profileResult.columns.length} columns
+            </span>
+            <span className="badge badge-success">
+              <span className="badge-dot" aria-hidden="true" /> Preprocessed
             </span>
           </div>
 
-          <div className="metric-grid" style={{ marginBottom: 16 }}>
-            <div className="metric-card" style={{ padding: 14 }}>
-              <span className="metric-label">Data Rows</span>
+          <div className="metric-grid" style={{ marginBottom: 4 }}>
+            <div className="metric-card flat">
+              <span className="metric-label">Data rows</span>
               <span className="metric-value" style={{ fontSize: '1.25rem' }}>
                 {profileResult.data_rows_count.toLocaleString()}
               </span>
             </div>
-            <div className="metric-card" style={{ padding: 14 }}>
-              <span className="metric-label">Detected Columns</span>
+            <div className="metric-card flat">
+              <span className="metric-label">Detected columns</span>
               <span className="metric-value" style={{ fontSize: '1.25rem' }}>
                 {profileResult.columns.length}
               </span>
             </div>
-            <div className="metric-card" style={{ padding: 14 }}>
-              <span className="metric-label">Duplicate Rows</span>
+            <div className="metric-card flat">
+              <span className="metric-label">Duplicate rows</span>
               <span className="metric-value" style={{ fontSize: '1.25rem' }}>
                 {profileResult.duplicate_rows_count}
               </span>
             </div>
           </div>
 
-          {/* Column Inferred Types */}
-          <div style={{ marginTop: 12 }}>
-            <h5 style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: 8 }}>
-              Inferred Schema & Normalized Columns:
-            </h5>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <div className="schema-block">
+            <h5 className="schema-title">Inferred schema &amp; normalized columns</h5>
+            <div className="chip-list">
               {profileResult.columns.map((col) => (
-                <div
-                  key={col.normalized_name}
-                  style={{
-                    backgroundColor: 'rgba(255, 255, 255, 0.04)',
-                    border: '1px solid var(--border-subtle)',
-                    padding: '6px 10px',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '0.8rem',
-                  }}
-                >
-                  <strong style={{ color: 'var(--text-main)' }}>{col.normalized_name}</strong>
-                  <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>({col.detected_type})</span>
+                <div key={col.normalized_name} className="chip" title={col.original_name}>
+                  <strong>{col.normalized_name}</strong>
+                  <span className="text-dim">· {col.detected_type}</span>
                 </div>
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {datasets.length > 0 && (
+        <div className="file-list">
+          <div className="file-list-title">
+            Session datasets ({datasets.length}) — upload at least two to reconcile
+          </div>
+          {datasets.map((dataset, index) => (
+            <div key={`${dataset.id}-${index}`} className="file-item">
+              <FileSpreadsheet size={17} className="file-item-icon" />
+              <div className="file-item-info">
+                <span className="file-item-name" title={dataset.name}>
+                  {dataset.name}
+                </span>
+                <span className="file-item-meta">
+                  {dataset.profile
+                    ? `${dataset.profile.data_rows_count.toLocaleString()} rows · ${dataset.profile.columns.length} columns`
+                    : 'Uploaded'}
+                </span>
+              </div>
+              {dataset.profile ? (
+                <span className="badge badge-success">
+                  <span className="badge-dot" aria-hidden="true" /> Ready
+                </span>
+              ) : (
+                <span className="badge badge-neutral">Uploaded</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {datasets.length === 0 && !busy && (
+        <div className="info-strip" style={{ marginTop: 16, marginBottom: 0 }}>
+          <Database size={15} />
+          <span>
+            <strong>Tip:</strong> upload both a baseline (source) and a comparison (target) dataset
+            to unlock the reconciliation engine.
+          </span>
+        </div>
+      )}
+
+      {profileResult && profileResult.issues.length > 0 && (
+        <div className="info-strip" style={{ marginTop: 16, marginBottom: 0 }}>
+          <ListChecks size={15} />
+          <span>
+            {profileResult.issues.length} validation note
+            {profileResult.issues.length === 1 ? '' : 's'} detected during preprocessing (e.g.{' '}
+            {profileResult.issues[0].message}).
+          </span>
         </div>
       )}
     </div>

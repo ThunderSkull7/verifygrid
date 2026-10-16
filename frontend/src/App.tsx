@@ -2,20 +2,33 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from './context/useAuth';
 import { AuthScreen } from './components/AuthScreen';
 import { Sidebar } from './components/Sidebar';
+import type { AppTab } from './components/Sidebar';
 import { ProjectsView } from './components/ProjectsView';
 import { FileUploadSection } from './components/FileUploadSection';
 import { ReconciliationConfig } from './components/ReconciliationConfig';
 import { VerificationResultsView } from './components/VerificationResultsView';
+import { AuditHistoryView } from './components/AuditHistoryView';
+import { AppearanceControl } from './components/AppearanceControl';
 import type { Project, PreprocessingResult, VerificationResponse, VerificationRun } from './types';
 import { api } from './services/api';
-import { AlertCircle, Database } from 'lucide-react';
+import { AlertCircle, Menu, ShieldCheck } from 'lucide-react';
+
+type ApiStatus = 'checking' | 'online' | 'offline';
+
+const TAB_META: Record<AppTab, { title: string; crumb: string }> = {
+  projects: { title: 'Projects', crumb: 'Workspaces' },
+  verify: { title: 'Reconciliation workspace', crumb: 'Compare datasets' },
+  runs: { title: 'Audit history', crumb: 'Persistent runs' },
+};
 
 export const App: React.FC = () => {
   const { isAuthenticated, isLoading } = useAuth();
-  const [activeTab, setActiveTab] = useState<'projects' | 'verify'>('projects');
+  const [activeTab, setActiveTab] = useState<AppTab>('projects');
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [loadingProjects, setLoadingProjects] = useState<boolean>(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
+  const [apiStatus, setApiStatus] = useState<ApiStatus>('checking');
 
   // Verification state for active workspace
   const [uploadedDatasets, setUploadedDatasets] = useState<
@@ -34,7 +47,7 @@ export const App: React.FC = () => {
         const data = await api.listProjects();
         if (!cancelled) {
           setProjects(data);
-          setActiveProject((prev) => (prev ? prev : data[0] ?? null));
+          setActiveProject((prev) => (prev ? prev : (data[0] ?? null)));
         }
       } catch (err) {
         console.error('Failed to load projects:', err);
@@ -44,14 +57,44 @@ export const App: React.FC = () => {
     };
 
     void loadProjects();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [isAuthenticated]);
+
+  // Real connectivity check against the FastAPI service (no fabricated status).
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    api
+      .checkHealth()
+      .then(() => {
+        if (!cancelled) setApiStatus('online');
+      })
+      .catch(() => {
+        if (!cancelled) setApiStatus('offline');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
+
+  // Close the mobile drawer when Escape is pressed.
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNavOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [mobileNavOpen]);
 
   const handleCreateProject = async (name: string, description?: string) => {
     const newProj = await api.createProject({ name, description });
     setProjects((prev) => [newProj, ...prev]);
     setActiveProject(newProj);
     setActiveTab('verify');
+    setMobileNavOpen(false);
     setUploadedDatasets([]);
     setVerificationResult(null);
   };
@@ -59,23 +102,23 @@ export const App: React.FC = () => {
   const handleSelectProject = (project: Project) => {
     setActiveProject(project);
     setActiveTab('verify');
+    setMobileNavOpen(false);
     setUploadedDatasets([]);
     setVerificationResult(null);
   };
 
+  const handleSelectTab = (tab: AppTab) => {
+    setActiveTab(tab);
+    setMobileNavOpen(false);
+  };
+
   if (isLoading) {
     return (
-      <div
-        style={{
-          minHeight: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          backgroundColor: 'var(--bg-primary)',
-          color: 'var(--text-muted)',
-        }}
-      >
-        Initializing VerifyGrid...
+      <div className="boot-splash">
+        <div className="brand-icon">
+          <ShieldCheck size={22} />
+        </div>
+        <span>Initialising VerifyGrid…</span>
       </div>
     );
   }
@@ -84,35 +127,58 @@ export const App: React.FC = () => {
     return <AuthScreen />;
   }
 
+  const tabMeta = TAB_META[activeTab];
+  const connectionLabel =
+    apiStatus === 'online' ? 'API connected' : apiStatus === 'offline' ? 'API offline' : 'Checking API…';
+
   return (
-    <div className="app-container">
+    <div className={`app-container ${mobileNavOpen ? 'sidebar-open' : ''}`}>
       <Sidebar
         currentTab={activeTab}
-        onSelectTab={(tab) => setActiveTab(tab as any)}
+        onSelectTab={handleSelectTab}
         selectedProjectName={activeProject?.name}
+        onClose={() => setMobileNavOpen(false)}
+        showClose
       />
+
+      {mobileNavOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setMobileNavOpen(false)}
+          aria-hidden="true"
+        />
+      )}
 
       <div className="main-wrapper">
         <header className="top-bar">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: '0.9rem', color: 'var(--text-dim)' }}>Workspace:</span>
-            <strong style={{ color: 'var(--text-main)', fontSize: '0.95rem' }}>
-              {activeProject ? activeProject.name : 'No Project Selected'}
-            </strong>
+          <div className="topbar-left">
+            <button
+              type="button"
+              className="icon-btn mobile-menu-btn"
+              onClick={() => setMobileNavOpen(true)}
+              aria-label="Open navigation"
+              aria-controls="app-sidebar"
+              aria-expanded={mobileNavOpen}
+            >
+              <Menu size={19} />
+            </button>
+            <div className="topbar-heading">
+              <span className="topbar-title">{tabMeta.title}</span>
+              <span className="topbar-subtitle">
+                {tabMeta.crumb}
+                {activeProject ? ` · ${activeProject.name}` : ''}
+              </span>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <span
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                fontSize: '0.75rem',
-                color: 'var(--accent-emerald)',
-              }}
-            >
-              <Database size={13} /> FastAPI Service Connected
+          <div className="topbar-right">
+            <span className={`connection-pill ${apiStatus}`} role="status">
+              <span className="connection-dot" aria-hidden="true" />
+              <span className="connection-label">{connectionLabel}</span>
             </span>
+            <div className="topbar-appearance">
+              <AppearanceControl variant="compact" />
+            </div>
           </div>
         </header>
 
@@ -131,26 +197,34 @@ export const App: React.FC = () => {
             <div>
               {!activeProject ? (
                 <div className="card empty-state">
-                  <AlertCircle size={40} className="empty-state-icon" />
-                  <h3 className="empty-state-title">Select or Create a Project</h3>
-                  <p style={{ marginBottom: 16 }}>
-                    You need an active project to upload datasets and run verification reconciliations.
+                  <div className="empty-icon">
+                    <AlertCircle size={24} />
+                  </div>
+                  <h3 className="empty-title">Select or create a project</h3>
+                  <p className="empty-text">
+                    You need an active project to upload datasets and run verification
+                    reconciliations.
                   </p>
                   <button className="btn btn-primary" onClick={() => setActiveTab('projects')}>
-                    Go to Projects
+                    Go to projects
                   </button>
                 </div>
               ) : (
                 <div>
-                  <div style={{ marginBottom: 24 }}>
-                    <h1 className="page-title">Dataset Reconciliation Workspace</h1>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: 4 }}>
-                      Upload baseline and target CSV/XLSX files, configure matching keys, and reconcile records.
-                    </p>
+                  <div className="page-header">
+                    <div>
+                      <h1 className="page-title">Dataset reconciliation</h1>
+                      <p className="page-subtitle">
+                        Upload baseline and target CSV/XLSX files, configure matching keys, and
+                        reconcile records against{' '}
+                        <strong>{activeProject.name}</strong>.
+                      </p>
+                    </div>
                   </div>
 
                   <FileUploadSection
                     project={activeProject}
+                    datasets={uploadedDatasets}
                     onFileUploaded={(file, profile) => {
                       setUploadedDatasets((prev) => [
                         ...prev,
@@ -159,7 +233,7 @@ export const App: React.FC = () => {
                     }}
                   />
 
-                  {uploadedDatasets.length >= 2 && (
+                  {uploadedDatasets.length >= 2 ? (
                     <ReconciliationConfig
                       project={activeProject}
                       datasets={uploadedDatasets}
@@ -168,20 +242,13 @@ export const App: React.FC = () => {
                         setCurrentRun(run);
                       }}
                     />
-                  )}
-
-                  {uploadedDatasets.length < 2 && (
-                    <div
-                      className="card"
-                      style={{
-                        padding: '16px 20px',
-                        backgroundColor: 'rgba(59, 130, 246, 0.05)',
-                        border: '1px solid rgba(59, 130, 246, 0.2)',
-                        color: 'var(--text-muted)',
-                        fontSize: '0.875rem',
-                      }}
-                    >
-                      💡 <strong>Next Step:</strong> Upload at least 2 files (source and target) to configure matching keys and trigger verification.
+                  ) : (
+                    <div className="info-strip">
+                      <AlertCircle size={15} />
+                      <span>
+                        <strong>Next step:</strong> upload at least two files (source and target) to
+                        configure matching keys and trigger verification.
+                      </span>
                     </div>
                   )}
 
@@ -193,6 +260,27 @@ export const App: React.FC = () => {
                     />
                   )}
                 </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'runs' && (
+            <div>
+              {!activeProject ? (
+                <div className="card empty-state">
+                  <div className="empty-icon">
+                    <AlertCircle size={24} />
+                  </div>
+                  <h3 className="empty-title">Select or create a project</h3>
+                  <p className="empty-text">
+                    Audit history is scoped to a project. Select one to view its verification runs.
+                  </p>
+                  <button className="btn btn-primary" onClick={() => setActiveTab('projects')}>
+                    Go to projects
+                  </button>
+                </div>
+              ) : (
+                <AuditHistoryView key={activeProject.id} project={activeProject} />
               )}
             </div>
           )}

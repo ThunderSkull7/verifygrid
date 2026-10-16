@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { Project } from '../types';
-import { FolderKanban, Plus, Clock, FileSpreadsheet, ArrowRight } from 'lucide-react';
+import { FolderKanban, Plus, Clock, ArrowRight, X, AlertCircle } from 'lucide-react';
 
 interface ProjectsViewProps {
   projects: Project[];
@@ -22,6 +22,26 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the name field when the modal opens and allow Escape to close it.
+  useEffect(() => {
+    if (!showCreateModal) return;
+    nameInputRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !submitting) {
+        setShowCreateModal(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [showCreateModal, submitting]);
+
+  const closeModal = () => {
+    if (submitting) return;
+    setShowCreateModal(false);
+    setError(null);
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,156 +63,168 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+      <div className="page-header">
         <div>
           <h1 className="page-title">Projects</h1>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: 4 }}>
-            Organize datasets and verification workflows by workspace or audit cycle.
+          <p className="page-subtitle">
+            Organise datasets and verification workflows by workspace or audit cycle.
           </p>
         </div>
         <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
-          <Plus size={16} /> New Project
+          <Plus size={16} /> New project
         </button>
       </div>
 
       {showCreateModal && (
-        <div className="card" style={{ maxWidth: 600, margin: '0 0 24px 0', border: '1px solid var(--primary)' }}>
-          <div className="card-header">
-            <h3 className="card-title">Create New Verification Project</h3>
-            <button className="btn btn-secondary btn-sm" onClick={() => setShowCreateModal(false)}>
-              Cancel
-            </button>
-          </div>
-          {error && <div className="alert-box alert-error">{error}</div>}
-          <form onSubmit={handleCreate}>
-            <div className="form-group">
-              <label className="form-label">Project Name</label>
-              <input
-                type="text"
-                required
-                className="form-input"
-                placeholder="e.g. Q4 General Ledger Reconciliation"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Description (Optional)</label>
-              <textarea
-                className="form-input"
-                rows={3}
-                placeholder="Details regarding audit scopes, datasets, or target systems..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+        <div className="modal-backdrop" onClick={closeModal}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-project-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <h3 className="card-title" id="create-project-title">
+                  New verification project
+                </h3>
+                <p className="card-description">
+                  Group related datasets and reconciliation runs into a single audit workspace.
+                </p>
+              </div>
               <button
                 type="button"
-                className="btn btn-secondary"
-                onClick={() => setShowCreateModal(false)}
+                className="icon-btn"
+                onClick={closeModal}
+                aria-label="Close dialog"
               >
-                Cancel
-              </button>
-              <button type="submit" className="btn btn-primary" disabled={submitting}>
-                {submitting ? 'Creating...' : 'Create Project'}
+                <X size={18} />
               </button>
             </div>
-          </form>
+
+            {error && (
+              <div className="alert alert-error" role="alert">
+                <AlertCircle size={16} />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCreate}>
+              <div className="form-group">
+                <label className="form-label" htmlFor="project-name">
+                  Project name
+                </label>
+                <input
+                  id="project-name"
+                  ref={nameInputRef}
+                  type="text"
+                  required
+                  className="form-input"
+                  placeholder="e.g. Q4 general ledger reconciliation"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label" htmlFor="project-description">
+                  Description <span className="text-dim">(optional)</span>
+                </label>
+                <textarea
+                  id="project-description"
+                  className="form-textarea"
+                  rows={3}
+                  placeholder="Details regarding audit scope, datasets, or target systems…"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" onClick={closeModal}>
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={submitting || !name.trim()}>
+                  {submitting ? (
+                    <>
+                      <span className="spinner on-primary" aria-hidden="true" /> Creating…
+                    </>
+                  ) : (
+                    'Create project'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
       {loading && (
-        <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)' }}>
-          Loading projects...
+        <div className="project-grid" aria-busy="true" aria-label="Loading projects">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="skeleton skeleton-card" />
+          ))}
         </div>
       )}
 
       {!loading && projects.length === 0 && (
         <div className="card empty-state">
-          <FolderKanban size={48} className="empty-state-icon" />
-          <h3 className="empty-state-title">No projects found</h3>
-          <p style={{ marginBottom: 20 }}>
-            Create your first verification project to begin uploading CSV/XLSX files and reconciling records.
+          <div className="empty-icon">
+            <FolderKanban size={26} />
+          </div>
+          <h3 className="empty-title">No projects yet</h3>
+          <p className="empty-text">
+            Create your first verification project to begin uploading CSV/XLSX files and
+            reconciling records.
           </p>
           <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
-            <Plus size={16} /> Create Project
+            <Plus size={16} /> Create project
           </button>
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 20 }}>
-        {projects.map((proj) => {
-          const isSelected = activeProject?.id === proj.id;
-          return (
-            <div
-              key={proj.id}
-              className="card"
-              style={{
-                marginBottom: 0,
-                borderColor: isSelected ? 'var(--primary)' : 'var(--border-color)',
-                backgroundColor: isSelected ? 'rgba(59, 130, 246, 0.05)' : 'var(--bg-card)',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-              }}
-            >
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-main)', marginBottom: 8 }}>
-                    {proj.name}
-                  </h3>
+      {!loading && projects.length > 0 && (
+        <div className="project-grid">
+          {projects.map((proj) => {
+            const isSelected = activeProject?.id === proj.id;
+            const created = new Date(proj.created_at);
+            return (
+              <article key={proj.id} className={`project-card ${isSelected ? 'active' : ''}`}>
+                <div className="project-card-top">
+                  <div className="project-icon">
+                    <FolderKanban size={18} />
+                  </div>
                   {isSelected && (
-                    <span className="badge badge-identical" style={{ fontSize: '0.7rem' }}>
+                    <span className="badge badge-success">
+                      <span className="badge-dot" aria-hidden="true" />
                       Active
                     </span>
                   )}
                 </div>
-                <p
-                  style={{
-                    fontSize: '0.875rem',
-                    color: 'var(--text-muted)',
-                    marginBottom: 16,
-                    minHeight: '40px',
-                  }}
-                >
-                  {proj.description || 'No description provided.'}
-                </p>
-              </div>
-
-              <div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 16,
-                    fontSize: '0.75rem',
-                    color: 'var(--text-dim)',
-                    paddingTop: 12,
-                    borderTop: '1px solid var(--border-subtle)',
-                    marginBottom: 14,
-                  }}
-                >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <Clock size={12} /> {new Date(proj.created_at).toLocaleDateString()}
-                  </span>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <FileSpreadsheet size={12} /> Ready
+                <h3 className="project-name">{proj.name}</h3>
+                <p className="project-desc">{proj.description || 'No description provided.'}</p>
+                <div className="project-meta">
+                  <span>
+                    <Clock size={12} /> Created{' '}
+                    {Number.isNaN(created.getTime())
+                      ? '—'
+                      : created.toLocaleDateString(undefined, {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                        })}
                   </span>
                 </div>
-
                 <button
-                  className={`btn ${isSelected ? 'btn-secondary' : 'btn-primary'}`}
-                  style={{ width: '100%' }}
+                  className={`btn ${isSelected ? 'btn-secondary' : 'btn-primary'} btn-block`}
                   onClick={() => onSelectProject(proj)}
                 >
-                  {isSelected ? 'Open Workspace' : 'Select Project'} <ArrowRight size={14} />
+                  {isSelected ? 'Open workspace' : 'Select project'} <ArrowRight size={14} />
                 </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

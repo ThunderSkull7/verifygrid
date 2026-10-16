@@ -4,7 +4,61 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <meta
+      name="description"
+      content="VerifyGrid — audit-grade dataset reconciliation with persistent runs and exportable reports."
+    />
+    <meta name="theme-color" content="#f6f8fb" />
+    <title>VerifyGrid — Data Reconciliation</title>
+    <script>
+      // Apply the persisted theme/accent before first paint to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var theme = localStorage.getItem('verifygrid_theme') || 'system';
+          var accent = localStorage.getItem('verifygrid_accent') || 'green';
+          var validThemes = ['light', 'dark', 'system'];
+          var validAccents = [
+            'green',
+            'blue',
+            'indigo',
+            'purple',
+            'teal',
+            'cyan',
+            'orange',
+            'rose',
+            'neutral',
+          ];
+          if (validThemes.indexOf(theme) === -1) theme = 'system';
+          if (validAccents.indexOf(accent) === -1) accent = 'green';
+          var resolved =
+            theme === 'system'
+              ? window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light'
+              : theme;
+          var root = document.documentElement;
+          root.setAttribute('data-theme', resolved);
+          root.setAttribute('data-accent', accent);
+          root.style.colorScheme = resolved;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0b1120' : '#f6f8fb');
+        } catch (e) {
+          /* localStorage unavailable — the app will apply defaults after mount. */
+        }
+      })();
+    </script>
+    <style>
+      /* Minimal pre-hydration surface so the first paint matches the app theme. */
+      html {
+        background: #f6f8fb;
+      }
+      html[data-theme='dark'] {
+        background: #0b1120;
+      }
+      body {
+        margin: 0;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
