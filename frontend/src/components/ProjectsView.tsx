@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { Project } from '../types';
-import { FolderKanban, Plus, Clock, ArrowRight, X, AlertCircle } from 'lucide-react';
+import { FolderKanban, Plus, Clock, ArrowRight, X, AlertCircle, Search, ArrowUpDown } from 'lucide-react';
 
 interface ProjectsViewProps {
   projects: Project[];
@@ -22,6 +22,8 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   const [description, setDescription] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'name'>('newest');
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   // Focus the name field when the modal opens and allow Escape to close it.
@@ -42,6 +44,23 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
     setShowCreateModal(false);
     setError(null);
   };
+
+  const filteredProjects = projects
+    .filter((project) => {
+      const query = searchQuery.trim().toLocaleLowerCase();
+      return (
+        !query ||
+        project.name.toLocaleLowerCase().includes(query) ||
+        (project.description || '').toLocaleLowerCase().includes(query)
+      );
+    })
+    .sort((a, b) => {
+      if (sortOrder === 'name') return a.name.localeCompare(b.name);
+      const aTime = new Date(a.created_at).getTime();
+      const bTime = new Date(b.created_at).getTime();
+      if (Number.isNaN(aTime) || Number.isNaN(bTime)) return 0;
+      return sortOrder === 'newest' ? bTime - aTime : aTime - bTime;
+    });
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -183,8 +202,40 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
       )}
 
       {!loading && projects.length > 0 && (
-        <div className="project-grid">
-          {projects.map((proj) => {
+        <>
+          <div className="project-toolbar">
+            <div className="project-search">
+              <Search size={16} aria-hidden="true" />
+              <input
+                type="search"
+                className="form-input"
+                aria-label="Search projects"
+                placeholder="Search by project name or description"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+            </div>
+            <label className="project-sort">
+              <ArrowUpDown size={15} aria-hidden="true" />
+              <span className="sr-only">Sort projects</span>
+              <select
+                className="form-input"
+                aria-label="Sort projects"
+                value={sortOrder}
+                onChange={(event) => setSortOrder(event.target.value as 'newest' | 'oldest' | 'name')}
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="name">Name A–Z</option>
+              </select>
+            </label>
+            <span className="project-count" role="status">
+              {filteredProjects.length} of {projects.length} projects
+            </span>
+          </div>
+          {filteredProjects.length > 0 ? (
+            <div className="project-grid">
+              {filteredProjects.map((proj) => {
             const isSelected = activeProject?.id === proj.id;
             const created = new Date(proj.created_at);
             return (
@@ -222,8 +273,21 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 </button>
               </article>
             );
-          })}
-        </div>
+              })}
+            </div>
+          ) : (
+            <div className="card empty-state">
+              <div className="empty-icon">
+                <Search size={24} />
+              </div>
+              <h3 className="empty-title">No matching projects</h3>
+              <p className="empty-text">Try another search term or clear your search.</p>
+              <button className="btn btn-secondary" onClick={() => setSearchQuery('')}>
+                Clear search
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
