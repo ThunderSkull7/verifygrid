@@ -27,6 +27,8 @@ export const App: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [loadingProjects, setLoadingProjects] = useState<boolean>(false);
+  const [projectLoadError, setProjectLoadError] = useState<string | null>(null);
+  const [projectReloadKey, setProjectReloadKey] = useState<number>(0);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
   const [apiStatus, setApiStatus] = useState<ApiStatus>('checking');
 
@@ -43,14 +45,22 @@ export const App: React.FC = () => {
     let cancelled = false;
     const loadProjects = async () => {
       setLoadingProjects(true);
+      setProjectLoadError(null);
       try {
         const data = await api.listProjects();
         if (!cancelled) {
           setProjects(data);
-          setActiveProject((prev) => (prev ? prev : (data[0] ?? null)));
+          setActiveProject((prev) =>
+            prev && data.some((project) => project.id === prev.id) ? prev : (data[0] ?? null),
+          );
         }
       } catch (err) {
         console.error('Failed to load projects:', err);
+        if (!cancelled) {
+          setProjectLoadError(
+            'We could not load your projects. Check your connection and try again.',
+          );
+        }
       } finally {
         if (!cancelled) setLoadingProjects(false);
       }
@@ -60,7 +70,7 @@ export const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated]);
+  }, [isAuthenticated, projectReloadKey]);
 
   // Real connectivity check against the FastAPI service (no fabricated status).
   useEffect(() => {
@@ -184,13 +194,28 @@ export const App: React.FC = () => {
 
         <main className="content-body">
           {activeTab === 'projects' && (
-            <ProjectsView
-              projects={projects}
-              activeProject={activeProject}
-              onSelectProject={handleSelectProject}
-              onCreateProject={handleCreateProject}
-              loading={loadingProjects}
-            />
+            <>
+              {projectLoadError && (
+                <div className="alert alert-error" role="alert">
+                  <span>{projectLoadError}</span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setProjectReloadKey((key) => key + 1)}
+                    disabled={loadingProjects}
+                  >
+                    {loadingProjects ? 'Retrying…' : 'Retry'}
+                  </button>
+                </div>
+              )}
+              <ProjectsView
+                projects={projects}
+                activeProject={activeProject}
+                onSelectProject={handleSelectProject}
+                onCreateProject={handleCreateProject}
+                loading={loadingProjects}
+              />
+            </>
           )}
 
           {activeTab === 'verify' && (
