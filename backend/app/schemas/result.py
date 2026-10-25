@@ -22,6 +22,7 @@ class MatchStatus(str, Enum):
     DUPLICATE_KEY_TARGET = "duplicate_key_target"
     DUPLICATE_KEY_BOTH = "duplicate_key_both"
     AMBIGUOUS_DUPLICATE = "ambiguous_duplicate"
+    NEEDS_REVIEW = "needs_review"
 
 
 class DiscrepancyCategory(str, Enum):
@@ -32,6 +33,25 @@ class DiscrepancyCategory(str, Enum):
     MISSING_RECORD = "missing_record"
     DUPLICATE_KEY = "duplicate_key"
     SCHEMA_MISMATCH = "schema_mismatch"
+    NEEDS_REVIEW = "needs_review"
+
+
+class ReasonCode(str, Enum):
+    """Explicit machine- and human-readable decision reason codes."""
+
+    EXACT_MATCH = "EXACT_MATCH"
+    FIELD_MISMATCH = "FIELD_MISMATCH"
+    FUZZY_NAME_REVIEW = "FUZZY_NAME_REVIEW"
+    STATUS_MISMATCH = "STATUS_MISMATCH"
+    ID_CONFLICT = "ID_CONFLICT"
+    AMOUNT_TOLERANCE_EXCEEDED = "AMOUNT_TOLERANCE_EXCEEDED"
+    MISSING_IN_TARGET = "MISSING_IN_TARGET"
+    MISSING_IN_SOURCE = "MISSING_IN_SOURCE"
+    DUPLICATE_KEY_SOURCE = "DUPLICATE_KEY_SOURCE"
+    DUPLICATE_KEY_TARGET = "DUPLICATE_KEY_TARGET"
+    DUPLICATE_KEY_BOTH = "DUPLICATE_KEY_BOTH"
+    AMBIGUOUS_DUPLICATE = "AMBIGUOUS_DUPLICATE"
+    NULL_KEY = "NULL_KEY"
 
 
 class FieldDifference(BaseModel):
@@ -46,7 +66,13 @@ class FieldDifference(BaseModel):
     target_type: Optional[str] = Field(default=None, description="Inferred type of target value")
     difference_type: str = Field(
         default="value_mismatch",
-        description="'value_mismatch', 'type_mismatch', 'null_mismatch'",
+        description="'value_mismatch', 'type_mismatch', 'null_mismatch', 'fuzzy_name_review', 'status_mismatch'",
+    )
+    reason_code: Optional[ReasonCode] = Field(
+        default=None, description="Specific reason code for this field difference"
+    )
+    confidence_score: Optional[float] = Field(
+        default=None, description="Similarity score (0.0 - 1.0) if fuzzy compared"
     )
     message: Optional[str] = Field(default=None, description="Explanation of difference")
 
@@ -58,11 +84,23 @@ class VerificationResultItem(BaseModel):
     key_values: Dict[str, Any] = Field(description="Values of the matching key columns")
     match_status: MatchStatus
     discrepancy_category: DiscrepancyCategory
+    reason_code: Optional[ReasonCode] = Field(
+        default=None, description="Explicit decision reason code"
+    )
+    confidence_score: Optional[float] = Field(
+        default=None, description="Matching confidence or similarity score (0.0 to 1.0)"
+    )
     source_row_number: Optional[int] = Field(
         default=None, description="Primary source row number (1-based), if applicable"
     )
     target_row_number: Optional[int] = Field(
         default=None, description="Primary target row number (1-based), if applicable"
+    )
+    source_row_index: Optional[int] = Field(
+        default=None, description="Lineage index of source record (alias for source_row_number)"
+    )
+    target_row_index: Optional[int] = Field(
+        default=None, description="Lineage index of target record (alias for target_row_number)"
     )
     source_row_numbers: List[int] = Field(
         default_factory=list,
@@ -71,6 +109,15 @@ class VerificationResultItem(BaseModel):
     target_row_numbers: List[int] = Field(
         default_factory=list,
         description="All target row numbers sharing this key (useful for duplicate keys)",
+    )
+    source_file_id: Optional[str] = Field(
+        default=None, description="Lineage reference to source file"
+    )
+    target_file_id: Optional[str] = Field(
+        default=None, description="Lineage reference to target file"
+    )
+    lineage: Optional[Dict[str, Any]] = Field(
+        default=None, description="Detailed record provenance and key trace"
     )
     source_record: Optional[Dict[str, Any]] = Field(
         default=None, description="Data record from source dataset"
@@ -107,6 +154,10 @@ class VerificationSummary(BaseModel):
         default=0,
         description="Alias for field_mismatches: count of records having field-level differences",
     )
+    needs_review_records: int = Field(
+        default=0,
+        description="Records requiring human review (fuzzy name variations or candidates)",
+    )
 
     # Missing metrics
     unmatched_source_records: int = Field(
@@ -118,16 +169,20 @@ class VerificationSummary(BaseModel):
 
     # Duplicate key metrics
     duplicate_source_records: int = Field(
-        description="Total source records belonging to duplicate matching keys in source"
+        default=0,
+        description="Total source records belonging to duplicate matching keys in source",
     )
     duplicate_target_records: int = Field(
-        description="Total target records belonging to duplicate matching keys in target"
+        default=0,
+        description="Total target records belonging to duplicate matching keys in target",
     )
     duplicate_source_keys_count: int = Field(
-        description="Number of distinct keys that appear multiple times in source"
+        default=0,
+        description="Number of distinct keys that appear multiple times in source",
     )
     duplicate_target_keys_count: int = Field(
-        description="Number of distinct keys that appear multiple times in target"
+        default=0,
+        description="Number of distinct keys that appear multiple times in target",
     )
     conflicting_duplicate_records: int = Field(
         default=0,
@@ -188,6 +243,32 @@ class VerificationRequest(BaseModel):
         default=True,
         description="Whether to include identical matching records in the results array.",
     )
+    enable_fuzzy_matching: bool = Field(
+        default=False,
+        description="Enable fuzzy candidate matching and name variation review.",
+    )
+    fuzzy_match_columns: Optional[List[str]] = Field(
+        default=None,
+        description="Explicit columns to evaluate for name/fuzzy similarity (e.g. ['name', 'full_name']).",
+    )
+    fuzzy_threshold: float = Field(
+        default=80.0,
+        ge=0.0,
+        le=100.0,
+        description="Similarity threshold for fuzzy candidate matching (0-100).",
+    )
+    status_rules: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional status rules for state-aware verification (e.g. active vs suspended).",
+    )
+    excluded_source_rows: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Optional list of 1-based source row indices to exclude from reconciliation (e.g. from quarantine).",
+    )
+    excluded_target_rows: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Optional list of 1-based target row indices to exclude from reconciliation (e.g. from quarantine).",
+    )
 
     model_config = ConfigDict(extra="ignore")
 
@@ -240,6 +321,32 @@ class InMemoryVerificationRequest(BaseModel):
     include_identical: bool = Field(
         default=True,
         description="Whether to include identical matching records in the results array.",
+    )
+    enable_fuzzy_matching: bool = Field(
+        default=False,
+        description="Enable fuzzy candidate matching and name variation review.",
+    )
+    fuzzy_match_columns: Optional[List[str]] = Field(
+        default=None,
+        description="Explicit columns to evaluate for name/fuzzy similarity (e.g. ['name', 'full_name']).",
+    )
+    fuzzy_threshold: float = Field(
+        default=80.0,
+        ge=0.0,
+        le=100.0,
+        description="Similarity threshold for fuzzy candidate matching (0-100).",
+    )
+    status_rules: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional status rules for state-aware verification (e.g. active vs suspended).",
+    )
+    excluded_source_rows: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Optional list of 1-based source row indices to exclude from reconciliation (e.g. from quarantine).",
+    )
+    excluded_target_rows: Optional[List[int]] = Field(
+        default_factory=list,
+        description="Optional list of 1-based target row indices to exclude from reconciliation (e.g. from quarantine).",
     )
 
     model_config = ConfigDict(extra="ignore")
@@ -314,6 +421,10 @@ class DiscrepancyItemResponse(BaseModel):
     key_values: Dict[str, Any]
     source_row_number: Optional[int] = None
     target_row_number: Optional[int] = None
+    source_row_index: Optional[int] = None
+    target_row_index: Optional[int] = None
+    reason_code: Optional[str] = None
+    confidence_score: Optional[float] = None
     source_row_numbers: Optional[List[int]] = None
     target_row_numbers: Optional[List[int]] = None
     source_record: Optional[Dict[str, Any]] = None

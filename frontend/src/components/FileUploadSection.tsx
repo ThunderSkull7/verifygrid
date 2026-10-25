@@ -8,7 +8,9 @@ import {
   Check,
   Database,
   ListChecks,
+  ShieldAlert,
 } from 'lucide-react';
+import { ProfilingQuarantineDrawer } from './ProfilingQuarantineDrawer';
 
 interface FileUploadSectionProps {
   project: Project;
@@ -28,6 +30,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [lastUploaded, setLastUploaded] = useState<SourceFile | null>(null);
   const [profileResult, setProfileResult] = useState<PreprocessingResult | null>(null);
+  const [drawerFile, setDrawerFile] = useState<{ id: string; name: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -167,6 +170,20 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
               {profileResult.data_rows_count.toLocaleString()} data rows ·{' '}
               {profileResult.columns.length} columns
             </span>
+            <button
+              type="button"
+              className="btn btn-secondary btn-xs"
+              style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+              onClick={() =>
+                setDrawerFile({
+                  id: lastUploaded.id,
+                  name: lastUploaded.original_filename,
+                })
+              }
+            >
+              <ShieldAlert size={13} className="text-accent" />
+              Pre-flight &amp; Quarantine
+            </button>
             <span className="badge badge-success">
               <span className="badge-dot" aria-hidden="true" /> Preprocessed
             </span>
@@ -225,6 +242,16 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
                     : 'Uploaded'}
                 </span>
               </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-xs"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                onClick={() => setDrawerFile({ id: dataset.id, name: dataset.name })}
+                title="Inspect profiling metrics and quarantine anomalies"
+              >
+                <ShieldAlert size={12} className="text-accent" />
+                Pre-flight Profile
+              </button>
               {dataset.profile ? (
                 <span className="badge badge-success">
                   <span className="badge-dot" aria-hidden="true" /> Ready
@@ -256,6 +283,16 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
             {profileResult.issues[0].message}).
           </span>
         </div>
+      )}
+
+      {drawerFile && (
+        <ProfilingQuarantineDrawer
+          projectId={project.id}
+          fileId={drawerFile.id}
+          filename={drawerFile.name}
+          isOpen={Boolean(drawerFile)}
+          onClose={() => setDrawerFile(null)}
+        />
       )}
     </div>
   );

@@ -91,14 +91,16 @@ export type MatchStatus =
   | 'duplicate_key_source'
   | 'duplicate_key_target'
   | 'duplicate_key_both'
-  | 'ambiguous_duplicate';
+  | 'ambiguous_duplicate'
+  | 'needs_review';
 
 export type DiscrepancyCategory =
   | 'none'
   | 'field_mismatch'
   | 'missing_record'
   | 'duplicate_key'
-  | 'schema_mismatch';
+  | 'schema_mismatch'
+  | 'needs_review';
 
 export interface FieldDifference {
   field_name: string;
@@ -109,6 +111,8 @@ export interface FieldDifference {
   source_type?: string | null;
   target_type?: string | null;
   difference_type: string;
+  reason_code?: string | null;
+  confidence_score?: number | null;
   message?: string | null;
 }
 
@@ -117,10 +121,17 @@ export interface VerificationResultItem {
   key_values: Record<string, any>;
   match_status: MatchStatus;
   discrepancy_category: DiscrepancyCategory;
+  reason_code?: string | null;
+  confidence_score?: number | null;
   source_row_number?: number | null;
   target_row_number?: number | null;
+  source_row_index?: number | null;
+  target_row_index?: number | null;
   source_row_numbers?: number[];
   target_row_numbers?: number[];
+  source_file_id?: string | null;
+  target_file_id?: string | null;
+  lineage?: Record<string, any> | null;
   source_record?: Record<string, any> | null;
   target_record?: Record<string, any> | null;
   field_differences?: FieldDifference[];
@@ -134,6 +145,7 @@ export interface VerificationSummary {
   identical_matches: number;
   field_mismatches: number;
   records_with_differences?: number;
+  needs_review_records?: number;
   unmatched_source_records: number;
   unmatched_target_records: number;
   duplicate_source_records: number;
@@ -156,7 +168,13 @@ export interface VerificationRequest {
   ignore_whitespace?: boolean;
   ignore_case?: boolean;
   include_identical?: boolean;
+  enable_fuzzy_matching?: boolean;
+  fuzzy_match_columns?: string[];
+  fuzzy_threshold?: number;
+  status_rules?: Record<string, any>;
   preprocessing_config?: PreprocessingConfig | null;
+  excluded_source_rows?: number[];
+  excluded_target_rows?: number[];
 }
 
 export interface VerificationResponse {
@@ -219,3 +237,107 @@ export interface DiscrepancyListResponse {
   skip: number;
   limit: number;
 }
+
+// --- Batch 2: Data Profiling & Quarantine Types ---
+
+export type QuarantineReasonCode =
+  | 'MALFORMED_DATE'
+  | 'INVALID_NUMBER'
+  | 'DUPLICATE_KEY'
+  | 'UNEXPECTED_NEGATIVE_AMOUNT'
+  | 'SHIFTED_ROW'
+  | 'SCHEMA_DRIFT';
+
+export type QuarantineSeverity = 'WARNING' | 'BLOCKING';
+
+export type ResolutionAction = 'PENDING' | 'EXCLUDE' | 'ACCEPT_AS_VALID';
+
+export interface QuarantinedRecord {
+  id: string;
+  source_row_index: number;
+  column_name: string;
+  raw_value: any;
+  quarantine_reason: QuarantineReasonCode;
+  severity: QuarantineSeverity;
+  message: string;
+  resolution_action: ResolutionAction;
+  resolution_note?: string | null;
+  raw_record?: Record<string, any> | null;
+}
+
+export interface ColumnProfile {
+  column_name: string;
+  original_name: string;
+  inferred_type: string;
+  total_count: number;
+  null_count: number;
+  null_percentage: number;
+  distinct_count: number;
+  uniqueness_ratio: number;
+  is_candidate_key: boolean;
+  sample_values: any[];
+  min_value?: any;
+  max_value?: any;
+  anomalies_count: number;
+}
+
+export interface CandidateKeyQuality {
+  column_name: string;
+  uniqueness_ratio: number;
+  duplicate_count: number;
+  null_count: number;
+  is_viable_key: boolean;
+  recommendation: string;
+}
+
+export interface PreFlightImpactPreview {
+  total_source_rows: number;
+  total_quarantined_records: number;
+  blocking_quarantine_count: number;
+  warning_quarantine_count: number;
+  excluded_rows_count: number;
+  accepted_rows_count: number;
+  eligible_rows_count: number;
+  quarantined_rows_count: number;
+}
+
+export interface FileProfileSummary {
+  file_id: string;
+  project_id: string;
+  filename: string;
+  file_type: string;
+  total_rows: number;
+  column_count: number;
+  columns: ColumnProfile[];
+  candidate_keys: CandidateKeyQuality[];
+  impact_preview: PreFlightImpactPreview;
+  quarantine_records_sample: QuarantinedRecord[];
+  created_at: string;
+}
+
+export interface QuarantineListResponse {
+  file_id: string;
+  total_quarantined: number;
+  records: QuarantinedRecord[];
+  impact_preview: PreFlightImpactPreview;
+}
+
+export interface QuarantineResolutionItem {
+  source_row_index: number;
+  action: ResolutionAction;
+  note?: string;
+}
+
+export interface QuarantineResolutionRequest {
+  resolutions: QuarantineResolutionItem[];
+}
+
+export interface QuarantineResolutionResponse {
+  file_id: string;
+  resolved_count: number;
+  excluded_row_indices: number[];
+  accepted_row_indices: number[];
+  impact_preview: PreFlightImpactPreview;
+  quarantined_records: QuarantinedRecord[];
+}
+

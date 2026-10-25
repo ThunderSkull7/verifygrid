@@ -5,10 +5,14 @@
 
 import type {
   DiscrepancyListResponse,
+  FileProfileSummary,
   PreprocessingConfig,
   PreprocessingResult,
   Project,
   ProjectCreate,
+  QuarantineListResponse,
+  QuarantineResolutionRequest,
+  QuarantineResolutionResponse,
   SourceFile,
   TokenResponse,
   User,
@@ -156,7 +160,7 @@ class ApiClient {
     });
   }
 
-  // --- Preprocessing Endpoints ---
+  // --- Preprocessing & Profiling Endpoints ---
   async preprocessFile(
     projectId: string,
     fileId: string,
@@ -167,6 +171,38 @@ class ApiClient {
       {
         method: 'POST',
         body: config ? JSON.stringify(config) : JSON.stringify({}),
+      }
+    );
+  }
+
+  async getFileProfile(
+    projectId: string,
+    fileId: string
+  ): Promise<FileProfileSummary> {
+    return this.request<FileProfileSummary>(
+      `/projects/${projectId}/files/${fileId}/profile`
+    );
+  }
+
+  async getFileQuarantine(
+    projectId: string,
+    fileId: string
+  ): Promise<QuarantineListResponse> {
+    return this.request<QuarantineListResponse>(
+      `/projects/${projectId}/files/${fileId}/quarantine`
+    );
+  }
+
+  async resolveQuarantine(
+    projectId: string,
+    fileId: string,
+    payload: QuarantineResolutionRequest
+  ): Promise<QuarantineResolutionResponse> {
+    return this.request<QuarantineResolutionResponse>(
+      `/projects/${projectId}/files/${fileId}/quarantine/resolve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
       }
     );
   }

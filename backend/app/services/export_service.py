@@ -23,6 +23,32 @@ from app.models.verification_run import VerificationRun, VerificationDiscrepancy
 from app.services.verification_engine import get_verification_run
 
 
+FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def sanitize_formula_value(val: Any) -> Any:
+    """
+    Neutralize spreadsheet formula injection by prepending a single quote
+    if string starts with formula trigger characters (=, +, -, @, \t, \r).
+    Pure numeric values (integers, floats) are preserved safely.
+    """
+    if val is None:
+        return ""
+    if isinstance(val, (int, float, bool)):
+        return val
+    s = str(val)
+    stripped = s.lstrip()
+    if stripped and stripped[0] in FORMULA_TRIGGER_CHARS:
+        if stripped[0] in ("+", "-"):
+            try:
+                float(stripped)
+                return s
+            except ValueError:
+                pass
+        return "'" + s
+    return s
+
+
 def _safe_filename(prefix: str, identifier: str, ext: str) -> str:
     """Generate a sanitized, injection-safe attachment filename."""
     clean_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(identifier))
@@ -37,8 +63,8 @@ def _format_field_differences(diff_list: Optional[List[Dict[str, Any]]]) -> str:
     items = []
     for d in diff_list:
         field = d.get("field_name") or d.get("source_field") or "unknown"
-        s_val = d.get("source_value")
-        t_val = d.get("target_value")
+        s_val = sanitize_formula_value(d.get("source_value"))
+        t_val = sanitize_formula_value(d.get("target_value"))
         diff_type = d.get("difference_type", "diff")
         items.append(f"{field} [{diff_type}]: '{s_val}' vs '{t_val}'")
     return "; ".join(items)
@@ -98,13 +124,13 @@ def generate_csv_report(
         diffs_str = _format_field_differences(item.field_differences)
 
         writer.writerow([
-            item.discrepancy_category,
-            item.match_status,
+            sanitize_formula_value(item.discrepancy_category),
+            sanitize_formula_value(item.match_status),
             src_row if src_row is not None else "",
             tgt_row if tgt_row is not None else "",
-            key_vals_str,
-            diffs_str,
-            item.message or "",
+            sanitize_formula_value(key_vals_str),
+            sanitize_formula_value(diffs_str),
+            sanitize_formula_value(item.message or ""),
         ])
 
     return output.getvalue().encode("utf-8")
@@ -191,13 +217,13 @@ def generate_xlsx_report(
 
         diffs_str = _format_field_differences(item.field_differences)
 
-        ws_disc.cell(row=r_idx, column=1, value=item.discrepancy_category)
-        ws_disc.cell(row=r_idx, column=2, value=item.match_status)
+        ws_disc.cell(row=r_idx, column=1, value=sanitize_formula_value(item.discrepancy_category))
+        ws_disc.cell(row=r_idx, column=2, value=sanitize_formula_value(item.match_status))
         ws_disc.cell(row=r_idx, column=3, value=str(src_row) if src_row is not None else "")
         ws_disc.cell(row=r_idx, column=4, value=str(tgt_row) if tgt_row is not None else "")
-        ws_disc.cell(row=r_idx, column=5, value=key_vals_str)
-        ws_disc.cell(row=r_idx, column=6, value=diffs_str)
-        ws_disc.cell(row=r_idx, column=7, value=item.message or "")
+        ws_disc.cell(row=r_idx, column=5, value=sanitize_formula_value(key_vals_str))
+        ws_disc.cell(row=r_idx, column=6, value=sanitize_formula_value(diffs_str))
+        ws_disc.cell(row=r_idx, column=7, value=sanitize_formula_value(item.message or ""))
 
     for col in ws_disc.columns:
         max_len = max(len(str(cell.value or "")) for cell in col)

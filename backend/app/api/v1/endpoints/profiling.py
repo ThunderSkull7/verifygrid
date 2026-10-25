@@ -1,0 +1,107 @@
+"""API router for source file profiling, pre-flight validation, and quarantine pipeline."""
+
+from __future__ import annotations
+
+import uuid
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_current_user
+from app.db.session import get_db
+from app.models.user import User
+from app.schemas.profiling import (
+    FileProfileSummary,
+    QuarantineListResponse,
+    QuarantineResolutionRequest,
+    QuarantineResolutionResponse,
+)
+from app.services.profiling_service import (
+    get_file_profile,
+    get_file_quarantine,
+    resolve_quarantine_records,
+)
+
+router = APIRouter()
+
+
+@router.get(
+    "/projects/{project_id}/files/{file_id}/profile",
+    response_model=FileProfileSummary,
+    status_code=status.HTTP_200_OK,
+    summary="Get file profiling summary, statistics, and anomalies",
+    description=(
+        "Analyzes column data types, null percentages, distinct counts, uniqueness ratios, "
+        "detects malformed numbers/dates, unexpected negative amounts, shifted rows, and key quality."
+    ),
+)
+def get_file_profile_endpoint(
+    project_id: uuid.UUID,
+    file_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileProfileSummary:
+    """Retrieve full profiling summary for a project file."""
+    return get_file_profile(
+        db=db,
+        project_id=project_id,
+        file_id=file_id,
+        current_user=current_user,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/files/{file_id}/quarantine",
+    response_model=QuarantineListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List quarantined records for a source file",
+    description="Returns all records flagged during pre-flight profiling with reason, severity, and impact preview.",
+)
+@router.get(
+    "/projects/{project_id}/files/{file_id}/profile/quarantine",
+    response_model=QuarantineListResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+def get_file_quarantine_endpoint(
+    project_id: uuid.UUID,
+    file_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> QuarantineListResponse:
+    """Retrieve quarantined records for a source file."""
+    return get_file_quarantine(
+        db=db,
+        project_id=project_id,
+        file_id=file_id,
+        current_user=current_user,
+    )
+
+
+@router.post(
+    "/projects/{project_id}/files/{file_id}/quarantine/resolve",
+    response_model=QuarantineResolutionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resolve quarantined records with pre-flight actions",
+    description="Applies 'EXCLUDE' or 'ACCEPT_AS_VALID' actions to quarantined rows and recalculates impact preview.",
+)
+@router.post(
+    "/projects/{project_id}/files/{file_id}/profile/quarantine/resolve",
+    response_model=QuarantineResolutionResponse,
+    status_code=status.HTTP_200_OK,
+    include_in_schema=False,
+)
+def resolve_quarantine_endpoint(
+    project_id: uuid.UUID,
+    file_id: uuid.UUID,
+    request: QuarantineResolutionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> QuarantineResolutionResponse:
+    """Resolve quarantined records with exclude or accept actions."""
+    return resolve_quarantine_records(
+        db=db,
+        project_id=project_id,
+        file_id=file_id,
+        request=request,
+        current_user=current_user,
+    )
