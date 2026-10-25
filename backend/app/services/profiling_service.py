@@ -17,6 +17,11 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.schemas.multisource import (
+    MultiSourceKeyRecommendRequest,
+    MultiSourceKeyRecommendResponse,
+    MultiSourceKeyRecommendation,
+)
 from app.models.source_file import SourceFile
 from app.models.user import User
 from app.schemas.preprocessing import PreprocessingConfig
@@ -36,6 +41,7 @@ from app.schemas.profiling import (
 )
 from app.services.preprocessing import extract_dataset_records, read_csv_rows, read_xlsx_rows
 from app.services.project_service import get_project_by_id
+from rapidfuzz import fuzz
 from app.utils.normalization import (
     is_boolean,
     is_null_value,
@@ -600,3 +606,259 @@ def resolve_quarantine_records(
         impact_preview=summary.impact_preview,
         quarantined_records=quarantined,
     )
+
+
+def discover_multisource_candidate_keys(
+    sources_records: Dict[str, List[Tuple[int, Dict[str, Any]]]],
+    null_set: Optional[Set[str]] = None,
+) -> List[MultiSourceKeyRecommendation]:
+    """
+    Analyzes multiple datasets across aliases, profiles candidate key attributes,
+    measures uniqueness ratios, null rates, and cross-source value overlaps, and returns
+    ranked single and composite candidate key recommendations.
+    """
+    if null_set is None:
+        null_set = {"none", "null", "nil", "nan", "n/a", "na", "#n/a", ""}
+
+    aliases = list(sources_records.keys())
+    if len(aliases) < 2:
+        return []
+
+    # 1. Profile each column per source: values set, total rows, uniqueness, null rate
+    source_col_stats: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for alias in aliases:
+        raw_records = sources_records[alias]
+        source_col_stats[alias] = {}
+        total = len(raw_records)
+        if total == 0:
+            continue
+
+        records: List[Tuple[int, Dict[str, Any]]] = []
+        for i, item in enumerate(raw_records):
+            if isinstance(item, tuple) and len(item) == 2:
+                records.append(item)
+            elif isinstance(item, dict):
+                records.append((i + 1, item))
+
+        sources_records[alias] = records
+        cols = list(records[0][1].keys())
+        for c in cols:
+            vals = []
+            null_count = 0
+            for _, r in records:
+                v = r.get(c)
+                if v is None or is_null_value(v, null_set):
+                    null_count += 1
+                else:
+                    vals.append(str(v).strip().lower())
+            distinct_vals = set(vals)
+            uniqueness = len(distinct_vals) / max(1, total)
+            null_rate = null_count / max(1, total)
+            source_col_stats[alias][c] = {
+                "values": distinct_vals,
+                "uniqueness": uniqueness,
+                "null_rate": null_rate,
+                "total": total,
+            }
+
+    recommendations: List[MultiSourceKeyRecommendation] = []
+
+    # 2. Match candidate single columns across sources
+    first_alias = aliases[0]
+    for col_a in source_col_stats.get(first_alias, {}).keys():
+        matched_cols: Dict[str, str] = {first_alias: col_a}
+        for other_alias in aliases[1:]:
+            best_match = None
+            best_sim = 0.0
+            for col_b in source_col_stats.get(other_alias, {}).keys():
+                if col_a.lower() == col_b.lower():
+                    best_match = col_b
+                    best_sim = 1.0
+                    break
+                sim = fuzz.token_sort_ratio(col_a.lower(), col_b.lower()) / 100.0
+                if sim > best_sim and sim >= 0.75:
+                    best_sim = sim
+                    best_match = col_b
+            if best_match:
+                matched_cols[other_alias] = best_match
+
+        if len(matched_cols) == len(aliases):
+            uniqueness_by_src = {
+                alias: round(source_col_stats[alias][matched_cols[alias]]["uniqueness"], 3)
+                for alias in aliases
+            }
+            null_rate_by_src = {
+                alias: round(source_col_stats[alias][matched_cols[alias]]["null_rate"], 3)
+                for alias in aliases
+            }
+
+            overlaps = []
+            for i in range(len(aliases)):
+                for j in range(i + 1, len(aliases)):
+                    s1 = source_col_stats[aliases[i]][matched_cols[aliases[i]]]["values"]
+                    s2 = source_col_stats[aliases[j]][matched_cols[aliases[j]]]["values"]
+                    union_len = len(s1 | s2)
+                    inter_len = len(s1 & s2)
+                    overlaps.append(inter_len / max(1, union_len))
+
+            avg_overlap = sum(overlaps) / max(1, len(overlaps))
+            avg_uniq = sum(uniqueness_by_src.values()) / len(uniqueness_by_src)
+            avg_null = sum(null_rate_by_src.values()) / len(null_rate_by_src)
+
+            overall_score = round(
+                (avg_uniq * 0.40) + ((1.0 - avg_null) * 0.30) + (avg_overlap * 0.30),
+                3,
+            )
+
+            if avg_uniq >= 0.4 or avg_overlap >= 0.3:
+                reason = (
+                    f"Strong single candidate key: {avg_uniq * 100:.1f}% average uniqueness, "
+                    f"{avg_overlap * 100:.1f}% cross-source value overlap, "
+                    f"and {avg_null * 100:.1f}% null rate."
+                )
+                recommendations.append(
+                    MultiSourceKeyRecommendation(
+                        key_name=col_a,
+                        is_composite=False,
+                        overall_score=overall_score,
+                        overlap_score=round(avg_overlap, 3),
+                        source_columns={alias: [matched_cols[alias]] for alias in aliases},
+                        uniqueness_by_source=uniqueness_by_src,
+                        null_rate_by_source=null_rate_by_src,
+                        recommendation_reason=reason,
+                    )
+                )
+
+    # 3. Composite Key Discovery (pairs of columns)
+    all_first_cols = list(source_col_stats.get(first_alias, {}).keys())
+    for idx1 in range(len(all_first_cols)):
+        for idx2 in range(idx1 + 1, min(len(all_first_cols), idx1 + 6)):
+            c1_a = all_first_cols[idx1]
+            c2_a = all_first_cols[idx2]
+
+            composite_matches: Dict[str, Tuple[str, str]] = {first_alias: (c1_a, c2_a)}
+            for other_alias in aliases[1:]:
+                match_c1 = None
+                match_c2 = None
+                for col_b in source_col_stats.get(other_alias, {}).keys():
+                    if col_b.lower() == c1_a.lower() or fuzz.token_sort_ratio(c1_a.lower(), col_b.lower()) >= 85:
+                        match_c1 = col_b
+                    elif col_b.lower() == c2_a.lower() or fuzz.token_sort_ratio(c2_a.lower(), col_b.lower()) >= 85:
+                        match_c2 = col_b
+                if match_c1 and match_c2:
+                    composite_matches[other_alias] = (match_c1, match_c2)
+
+            if len(composite_matches) == len(aliases):
+                comp_uniq: Dict[str, float] = {}
+                comp_null: Dict[str, float] = {}
+                comp_vals_by_src: Dict[str, Set[Tuple[str, str]]] = {}
+
+                for alias in aliases:
+                    c1, c2 = composite_matches[alias]
+                    recs = sources_records[alias]
+                    total = len(recs)
+                    c_vals = set()
+                    null_c = 0
+                    for _, r in recs:
+                        v1 = r.get(c1)
+                        v2 = r.get(c2)
+                        if v1 is None or v2 is None or is_null_value(v1, null_set) or is_null_value(v2, null_set):
+                            null_c += 1
+                        else:
+                            c_vals.add((str(v1).strip().lower(), str(v2).strip().lower()))
+                    comp_vals_by_src[alias] = c_vals
+                    comp_uniq[alias] = round(len(c_vals) / max(1, total), 3)
+                    comp_null[alias] = round(null_c / max(1, total), 3)
+
+                avg_comp_uniq = sum(comp_uniq.values()) / len(comp_uniq)
+                avg_comp_null = sum(comp_null.values()) / len(comp_null)
+
+                c1_single_uniq = source_col_stats[first_alias][c1_a]["uniqueness"]
+                c2_single_uniq = source_col_stats[first_alias][c2_a]["uniqueness"]
+                if avg_comp_uniq >= 0.85 and (avg_comp_uniq > max(c1_single_uniq, c2_single_uniq) or c1_single_uniq < 0.95):
+                    c_overlaps = []
+                    for i in range(len(aliases)):
+                        for j in range(i + 1, len(aliases)):
+                            s1 = comp_vals_by_src[aliases[i]]
+                            s2 = comp_vals_by_src[aliases[j]]
+                            union_l = len(s1 | s2)
+                            inter_l = len(s1 & s2)
+                            c_overlaps.append(inter_l / max(1, union_l))
+                    avg_c_overlap = sum(c_overlaps) / max(1, len(c_overlaps))
+
+                    score = round(
+                        (avg_comp_uniq * 0.40) + ((1.0 - avg_comp_null) * 0.30) + (avg_c_overlap * 0.30),
+                        3,
+                    )
+                    composite_name = f"{c1_a} + {c2_a}"
+                    reason = (
+                        f"Viable composite candidate key: resolves collisions with {avg_comp_uniq * 100:.1f}% "
+                        f"combined uniqueness and {avg_c_overlap * 100:.1f}% cross-source value overlap."
+                    )
+                    recommendations.append(
+                        MultiSourceKeyRecommendation(
+                            key_name=composite_name,
+                            is_composite=True,
+                            overall_score=score,
+                            overlap_score=round(avg_c_overlap, 3),
+                            source_columns={
+                                alias: [composite_matches[alias][0], composite_matches[alias][1]]
+                                for alias in aliases
+                            },
+                            uniqueness_by_source=comp_uniq,
+                            null_rate_by_source=comp_null,
+                            recommendation_reason=reason,
+                        )
+                    )
+
+    recommendations.sort(key=lambda r: r.overall_score, reverse=True)
+    return recommendations
+
+
+def recommend_keys_for_project_files(
+    db: Session,
+    project_id: uuid.UUID,
+    file_ids: List[uuid.UUID],
+    aliases: Optional[List[str]] = None,
+    current_user: Optional[User] = None,
+) -> MultiSourceKeyRecommendResponse:
+    """Recommend candidate keys across multiple project files."""
+    project = get_project_by_id(db, project_id, current_user=current_user)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
+    if len(file_ids) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="At least two file IDs are required to discover candidate join keys.",
+        )
+
+    cfg = PreprocessingConfig()
+    sources_records: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+    total_cols = 0
+
+    for idx, f_id in enumerate(file_ids):
+        sf = db.query(SourceFile).filter(
+            SourceFile.id == f_id,
+            SourceFile.project_id == project_id,
+        ).first()
+        if sf is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Source file {f_id} not found for this project.",
+            )
+        alias = aliases[idx] if aliases and idx < len(aliases) else f"source_{idx + 1}"
+        path_resolved = Path(sf.storage_path).resolve()
+        recs, cols, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, cfg)
+        sources_records[alias] = recs
+        total_cols += len(cols)
+
+    recommendations = discover_multisource_candidate_keys(sources_records)
+    return MultiSourceKeyRecommendResponse(
+        recommendations=recommendations,
+        total_evaluated_columns=total_cols,
+    )
+
