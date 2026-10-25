@@ -89,6 +89,10 @@ class MultiSourceVerificationRequest(BaseModel):
         default=None,
         description="Optional status rules for cross-system state mapping (e.g. settled == completed).",
     )
+    rule_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional versioned rule configuration and 1:N aggregation settings.",
+    )
     preprocessing_config: Optional[PreprocessingConfig] = Field(
         default=None,
         description="Optional preprocessing config overrides.",

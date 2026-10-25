@@ -92,7 +92,11 @@ export type MatchStatus =
   | 'duplicate_key_target'
   | 'duplicate_key_both'
   | 'ambiguous_duplicate'
-  | 'needs_review';
+  | 'needs_review'
+  | 'partial_payment'
+  | 'overpayment'
+  | 'unmatched_split_record'
+  | 'duplicate_receipt';
 
 export type DiscrepancyCategory =
   | 'none'
@@ -100,7 +104,9 @@ export type DiscrepancyCategory =
   | 'missing_record'
   | 'duplicate_key'
   | 'schema_mismatch'
-  | 'needs_review';
+  | 'needs_review'
+  | 'aggregation_mismatch'
+  | 'rule_violation';
 
 export interface FieldDifference {
   field_name: string;
@@ -138,6 +144,9 @@ export interface VerificationResultItem {
   source_presence?: Record<string, boolean> | null;
   source_record?: Record<string, any> | null;
   target_record?: Record<string, any> | null;
+  child_records?: any[] | null;
+  aggregated_amount?: number | null;
+  expected_amount?: number | null;
   field_differences?: FieldDifference[];
   message?: string | null;
 }
@@ -371,6 +380,7 @@ export interface MultiSourceVerificationRequest {
   ignore_case?: boolean;
   include_identical?: boolean;
   status_rules?: Record<string, any>;
+  rule_config?: VersionedRuleConfig | null;
   preprocessing_config?: PreprocessingConfig | null;
 }
 
@@ -407,6 +417,154 @@ export interface MultiSourceVerificationResponse {
   discrepancies: VerificationResultItem[];
   warnings: any[];
   errors: string[];
+}
+
+// --- Batch 4: Advanced Rule Engine & Aggregation Types ---
+
+export type RuleSeverity = 'BLOCKING' | 'WARNING' | 'INFO';
+
+export type PredicateOperator =
+  | 'equal'
+  | 'not_equal'
+  | 'in'
+  | 'not_in'
+  | 'greater_than'
+  | 'less_than'
+  | 'greater_equal'
+  | 'less_equal'
+  | 'between'
+  | 'regex'
+  | 'is_null'
+  | 'is_not_null';
+
+export type ToleranceMode = 'absolute' | 'percentage' | 'both_or' | 'both_and';
+
+export interface WhereCondition {
+  field: string;
+  operator: PredicateOperator;
+  value?: any;
+  target_field?: string | null;
+  source_alias?: string | null;
+  severity?: RuleSeverity;
+  description?: string | null;
+}
+
+export interface DateWindowRule {
+  source_date_field: string;
+  target_date_field: string;
+  source_alias?: string | null;
+  target_alias?: string | null;
+  lag_days_before: number;
+  lag_days_after: number;
+  date_format?: string | null;
+  severity?: RuleSeverity;
+  description?: string | null;
+}
+
+export interface NumericToleranceRule {
+  source_amount_field: string;
+  target_amount_field: string;
+  source_alias?: string | null;
+  target_alias?: string | null;
+  absolute_tolerance: number;
+  percentage_tolerance: number;
+  tolerance_mode?: ToleranceMode;
+  severity?: RuleSeverity;
+  description?: string | null;
+}
+
+export interface StatusTransitionRule {
+  source_field: string;
+  target_field: string;
+  source_alias?: string | null;
+  target_alias?: string | null;
+  allowed_transitions: Record<string, string[]>;
+  case_sensitive?: boolean;
+  severity?: RuleSeverity;
+  description?: string | null;
+}
+
+export interface CompoundRule {
+  id?: string | null;
+  name: string;
+  description?: string | null;
+  severity?: RuleSeverity;
+  conjunction?: 'AND' | 'OR';
+  conditions: WhereCondition[];
+}
+
+export interface AggregationConfig {
+  enabled: boolean;
+  parent_source_alias: string;
+  child_source_alias: string;
+  parent_key: string;
+  child_grouping_key: string;
+  parent_amount_field: string;
+  child_amount_field: string;
+  child_receipt_id_field?: string | null;
+  child_date_field?: string | null;
+  parent_date_field?: string | null;
+  numeric_tolerance?: number;
+  percentage_tolerance?: number;
+  allow_partial_payment?: boolean;
+  allow_overpayment?: boolean;
+}
+
+export interface VersionedRuleConfig {
+  version: string;
+  name?: string | null;
+  description?: string | null;
+  where_conditions: WhereCondition[];
+  date_window_rules: DateWindowRule[];
+  numeric_tolerance_rules: NumericToleranceRule[];
+  status_transition_rules: StatusTransitionRule[];
+  custom_rules: CompoundRule[];
+  aggregation_config?: AggregationConfig | null;
+}
+
+export interface RuleValidateRequest {
+  rules: VersionedRuleConfig;
+  file_ids?: string[];
+  sources?: SourceDefinition[];
+}
+
+export interface RuleValidateResponse {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  total_rules_checked: number;
+  field_resolutions: Record<string, boolean>;
+}
+
+export interface RulePreviewRequest {
+  rules: VersionedRuleConfig;
+  sources: SourceDefinition[];
+  unified_keys?: string[] | null;
+  sample_size?: number;
+}
+
+export interface RulePreviewResponse {
+  total_evaluated: number;
+  passed_count: number;
+  exception_count: number;
+  exceptions_by_rule: Record<string, number>;
+  exceptions_by_severity: Record<string, number>;
+  sample_discrepancies: Array<{
+    source_row?: number;
+    target_row?: number;
+    key?: Record<string, any>;
+    status?: string;
+    reason?: string;
+    message?: string;
+    aggregated_amount?: number;
+    expected_amount?: number;
+    violations?: Array<{
+      rule: string;
+      severity: string;
+      reason_code: string;
+      message?: string;
+    }>;
+  }>;
 }
 
 

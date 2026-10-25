@@ -11,6 +11,7 @@ from app.api.v1.endpoints.verification import router as verification_router
 from app.api.v1.endpoints.exports import router as exports_router
 from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.profiling import router as profiling_router
+from app.api.v1.endpoints.rules import router as rules_router
 
 logger = logging.getLogger(__name__)
 
@@ -62,5 +63,6 @@ api_router.include_router(preprocessing_router, tags=["Preprocessing"])
 api_router.include_router(verification_router, tags=["Verification"])
 api_router.include_router(exports_router, tags=["Exports"])
 api_router.include_router(profiling_router, tags=["Profiling & Quarantine"])
+api_router.include_router(rules_router, tags=["Rules & Aggregation"])
 
 

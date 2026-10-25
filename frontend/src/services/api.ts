@@ -17,6 +17,10 @@ import type {
   QuarantineListResponse,
   QuarantineResolutionRequest,
   QuarantineResolutionResponse,
+  RulePreviewRequest,
+  RulePreviewResponse,
+  RuleValidateRequest,
+  RuleValidateResponse,
   SourceFile,
   TokenResponse,
   User,
@@ -265,6 +269,33 @@ class ApiClient {
   ): Promise<VerificationRun> {
     return this.request<VerificationRun>(
       `/projects/${projectId}/runs/multi-source`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  // --- Batch 4: Rule Engine & Aggregation Endpoints ---
+  async validateRules(
+    projectId: string,
+    payload: RuleValidateRequest
+  ): Promise<RuleValidateResponse> {
+    return this.request<RuleValidateResponse>(
+      `/projects/${projectId}/rules/validate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async previewRules(
+    projectId: string,
+    payload: RulePreviewRequest
+  ): Promise<RulePreviewResponse> {
+    return this.request<RulePreviewResponse>(
+      `/projects/${projectId}/rules/preview`,
       {
         method: 'POST',
         body: JSON.stringify(payload),

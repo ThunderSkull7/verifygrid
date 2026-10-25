@@ -23,6 +23,10 @@ class MatchStatus(str, Enum):
     DUPLICATE_KEY_BOTH = "duplicate_key_both"
     AMBIGUOUS_DUPLICATE = "ambiguous_duplicate"
     NEEDS_REVIEW = "needs_review"
+    PARTIAL_PAYMENT = "partial_payment"
+    OVERPAYMENT = "overpayment"
+    UNMATCHED_SPLIT_RECORD = "unmatched_split_record"
+    DUPLICATE_RECEIPT = "duplicate_receipt"
 
 
 class DiscrepancyCategory(str, Enum):
@@ -34,6 +38,8 @@ class DiscrepancyCategory(str, Enum):
     DUPLICATE_KEY = "duplicate_key"
     SCHEMA_MISMATCH = "schema_mismatch"
     NEEDS_REVIEW = "needs_review"
+    AGGREGATION_MISMATCH = "aggregation_mismatch"
+    RULE_VIOLATION = "rule_violation"
 
 
 class ReasonCode(str, Enum):
@@ -52,6 +58,14 @@ class ReasonCode(str, Enum):
     DUPLICATE_KEY_BOTH = "DUPLICATE_KEY_BOTH"
     AMBIGUOUS_DUPLICATE = "AMBIGUOUS_DUPLICATE"
     NULL_KEY = "NULL_KEY"
+    DATE_WINDOW_EXCEEDED = "DATE_WINDOW_EXCEEDED"
+    PERCENTAGE_TOLERANCE_EXCEEDED = "PERCENTAGE_TOLERANCE_EXCEEDED"
+    PREDICATE_VIOLATION = "PREDICATE_VIOLATION"
+    STATUS_TRANSITION_VIOLATION = "STATUS_TRANSITION_VIOLATION"
+    PARTIAL_PAYMENT = "PARTIAL_PAYMENT"
+    OVERPAYMENT = "OVERPAYMENT"
+    UNMATCHED_SPLIT_RECORD = "UNMATCHED_SPLIT_RECORD"
+    DUPLICATE_RECEIPT = "DUPLICATE_RECEIPT"
 
 
 class FieldDifference(BaseModel):
@@ -144,6 +158,18 @@ class VerificationResultItem(BaseModel):
     field_differences: List[FieldDifference] = Field(
         default_factory=list,
         description="List of detected differences across compared fields",
+    )
+    child_records: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Lineage of individual child installment receipts in split-payment reconciliation",
+    )
+    aggregated_amount: Optional[float] = Field(
+        default=None,
+        description="Sum of child installment amounts in split-payment reconciliation",
+    )
+    expected_amount: Optional[float] = Field(
+        default=None,
+        description="Expected parent total amount in split-payment reconciliation",
     )
     message: Optional[str] = Field(
         default=None, description="Human-readable outcome or explanation"
@@ -451,6 +477,9 @@ class DiscrepancyItemResponse(BaseModel):
     source_record: Optional[Dict[str, Any]] = None
     target_record: Optional[Dict[str, Any]] = None
     field_differences: Optional[List[Dict[str, Any]]] = None
+    child_records: Optional[List[Dict[str, Any]]] = None
+    aggregated_amount: Optional[float] = None
+    expected_amount: Optional[float] = None
     message: Optional[str] = None
     created_at: datetime
 

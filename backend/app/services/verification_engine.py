@@ -1800,6 +1800,7 @@ def verify_multisource_datasets(
     null_values: Optional[List[str]] = None,
     include_identical: bool = True,
     status_rules: Optional[Dict[str, Any]] = None,
+    rule_config: Optional[Any] = None,
 ) -> Tuple[
     VerificationSummary,
     List[VerificationResultItem],
@@ -1828,6 +1829,37 @@ def verify_multisource_datasets(
         filtered_records[s.alias] = [
             (r_num, rec) for r_num, rec in sources_records[s.alias] if r_num not in ex_rows
         ]
+
+    # Check for Split-Payment Aggregation Mode
+    from app.schemas.rule import VersionedRuleConfig
+    v_rules: Optional[VersionedRuleConfig] = None
+    if rule_config:
+        if isinstance(rule_config, VersionedRuleConfig):
+            v_rules = rule_config
+        elif isinstance(rule_config, dict):
+            try:
+                v_rules = VersionedRuleConfig.model_validate(rule_config)
+            except Exception:
+                pass
+
+    if v_rules and v_rules.aggregation_config and v_rules.aggregation_config.enabled:
+        from app.services.aggregation_engine import reconcile_split_payments
+        ac = v_rules.aggregation_config
+        p_recs = filtered_records.get(ac.parent_source_alias, [])
+        c_recs = filtered_records.get(ac.child_source_alias, [])
+        agg_summary, agg_results, agg_discrepancies = reconcile_split_payments(
+            parent_records=p_recs,
+            child_records=c_recs,
+            config=ac,
+            date_window_rules=v_rules.date_window_rules,
+            include_identical=include_identical,
+        )
+        records_by_src = {s.alias: len(filtered_records.get(s.alias, [])) for s in sources}
+        missing_by_src = {
+            ac.parent_source_alias: agg_summary.unmatched_source_records,
+            ac.child_source_alias: agg_summary.unmatched_target_records,
+        }
+        return agg_summary, agg_results, agg_discrepancies, records_by_src, missing_by_src
 
     # Index records by normalized key tuple per source
     source_key_groups: Dict[str, Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]]] = defaultdict(
@@ -2017,6 +2049,56 @@ def verify_multisource_datasets(
                             )
                         )
 
+            # Evaluate Date Window Rules if configured
+            if v_rules and v_rules.date_window_rules and prim_rec:
+                from app.services.rule_engine import evaluate_date_window
+                for dw in v_rules.date_window_rules:
+                    s_val = prim_rec.get(dw.source_date_field)
+                    for sec_s in sources[1:]:
+                        if presence[sec_s.alias]:
+                            t_rec = source_recs_map[sec_s.alias]
+                            t_val = t_rec.get(dw.target_date_field)
+                            if s_val is not None and t_val is not None:
+                                passed, d_msg = evaluate_date_window(s_val, t_val, dw)
+                                if not passed:
+                                    diffs.append(
+                                        FieldDifference(
+                                            field_name=dw.source_date_field,
+                                            source_field=f"{primary_alias}.{dw.source_date_field}",
+                                            target_field=f"{sec_s.alias}.{dw.target_date_field}",
+                                            source_value=s_val,
+                                            target_value=t_val,
+                                            difference_type="date_window_exceeded",
+                                            reason_code=ReasonCode.DATE_WINDOW_EXCEEDED,
+                                            message=d_msg,
+                                        )
+                                    )
+
+            # Evaluate Status Transition Rules if configured
+            if v_rules and v_rules.status_transition_rules and prim_rec:
+                from app.services.rule_engine import evaluate_status_transition
+                for st in v_rules.status_transition_rules:
+                    s_val = prim_rec.get(st.source_field)
+                    for sec_s in sources[1:]:
+                        if presence[sec_s.alias]:
+                            t_rec = source_recs_map[sec_s.alias]
+                            t_val = t_rec.get(st.target_field)
+                            if s_val is not None and t_val is not None:
+                                passed, s_msg = evaluate_status_transition(s_val, t_val, st)
+                                if not passed:
+                                    diffs.append(
+                                        FieldDifference(
+                                            field_name=st.source_field,
+                                            source_field=f"{primary_alias}.{st.source_field}",
+                                            target_field=f"{sec_s.alias}.{st.target_field}",
+                                            source_value=s_val,
+                                            target_value=t_val,
+                                            difference_type="status_transition_violation",
+                                            reason_code=ReasonCode.STATUS_TRANSITION_VIOLATION,
+                                            message=s_msg,
+                                        )
+                                    )
+
             if not diffs:
                 identical_matches += 1
                 item = VerificationResultItem(
@@ -2073,11 +2155,20 @@ def verify_multisource_datasets(
                 discrepancies.append(item)
             else:
                 field_mismatches += 1
+                # Check for explicit date window or status transition rule violation
+                has_dw = any(d.reason_code == ReasonCode.DATE_WINDOW_EXCEEDED for d in diffs)
+                has_st = any(d.reason_code == ReasonCode.STATUS_TRANSITION_VIOLATION for d in diffs)
+                item_cat = DiscrepancyCategory.RULE_VIOLATION if (has_dw or has_st) else DiscrepancyCategory.FIELD_MISMATCH
+                item_reason = (
+                    ReasonCode.DATE_WINDOW_EXCEEDED if has_dw
+                    else ReasonCode.STATUS_TRANSITION_VIOLATION if has_st
+                    else ReasonCode.FIELD_MISMATCH
+                )
                 item = VerificationResultItem(
                     key_values=k_dict,
                     match_status=MatchStatus.FIELD_MISMATCH,
-                    discrepancy_category=DiscrepancyCategory.FIELD_MISMATCH,
-                    reason_code=ReasonCode.FIELD_MISMATCH,
+                    discrepancy_category=item_cat,
+                    reason_code=item_reason,
                     confidence_score=0.0,
                     source_row_indices=row_indices,
                     source_records=source_recs_map,
@@ -2235,6 +2326,7 @@ def verify_multisource_project_files(
         null_values=cfg.null_values,
         include_identical=request.include_identical,
         status_rules=request.status_rules,
+        rule_config=request.rule_config,
     )
 
     return MultiSourceVerificationResponse(
@@ -2331,6 +2423,7 @@ def create_and_execute_multisource_run(
                 null_values=cfg.null_values,
                 include_identical=request.include_identical,
                 status_rules=request.status_rules,
+                rule_config=request.rule_config,
             )
 
             run.status = "completed"
@@ -2352,6 +2445,9 @@ def create_and_execute_multisource_run(
                     source_records=item.source_records,
                     source_record=item.source_record,
                     target_record=item.target_record,
+                    child_records=item.child_records,
+                    aggregated_amount=item.aggregated_amount,
+                    expected_amount=item.expected_amount,
                     field_differences=[d.model_dump() for d in item.field_differences] if item.field_differences else None,
                     message=item.message,
                 )
