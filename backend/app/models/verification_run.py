@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from sqlalchemy import (
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     JSON,
@@ -178,6 +179,18 @@ class VerificationDiscrepancy(Base):
         JSON,
         nullable=True,
     )
+    child_records: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    aggregated_amount: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    expected_amount: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     message: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
@@ -219,6 +232,10 @@ class VerificationDiscrepancy(Base):
             "duplicate_key_both": "DUPLICATE_KEY_BOTH",
             "ambiguous_duplicate": "AMBIGUOUS_DUPLICATE",
             "needs_review": "FUZZY_NAME_REVIEW",
+            "partial_payment": "PARTIAL_PAYMENT",
+            "overpayment": "OVERPAYMENT",
+            "unmatched_split_record": "UNMATCHED_SPLIT_RECORD",
+            "duplicate_receipt": "DUPLICATE_RECEIPT",
         }
         return status_to_reason.get(self.match_status, "FIELD_MISMATCH")
 

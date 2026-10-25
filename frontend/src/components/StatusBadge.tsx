@@ -37,6 +37,13 @@ const STATUS_META: Record<string, StatusMeta> = {
   duplicate_key_target: { label: 'Duplicate in target', className: 'badge-duplicate_key_target' },
   duplicate_key_both: { label: 'Duplicate in both', className: 'badge-duplicate_key_both' },
   ambiguous_duplicate: { label: 'Ambiguous duplicate', className: 'badge-ambiguous_duplicate' },
+  // Aggregation & split-payment statuses
+  partial_payment: { label: 'Partial Payment', className: 'badge-requires_review' },
+  overpayment: { label: 'Overpayment', className: 'badge-requires_review' },
+  unmatched_split_record: { label: 'Orphan Split', className: 'badge-missing_in_target' },
+  duplicate_receipt: { label: 'Duplicate Receipt', className: 'badge-duplicate_key' },
+  aggregation_mismatch: { label: 'Aggregation Mismatch', className: 'badge-field_mismatch' },
+  rule_violation: { label: 'Rule Violation', className: 'badge-field_mismatch' },
 };
 
 interface StatusBadgeProps {

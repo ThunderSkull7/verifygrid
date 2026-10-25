@@ -1,13 +1,20 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type {
+  AggregationConfig,
+  DateWindowRule,
   MultiSourceKeyRecommendation,
   MultiSourceVerificationRequest,
   MultiSourceVerificationResponse,
+  NumericToleranceRule,
+  PredicateOperator,
   PreprocessingResult,
   Project,
+  RulePreviewResponse,
   SourceDefinition,
   SourceFile,
   VerificationRun,
+  VersionedRuleConfig,
+  WhereCondition,
 } from '../types';
 import { api } from '../services/api';
 import { FileUploadSection } from './FileUploadSection';
@@ -16,22 +23,27 @@ import { StatusBadge } from './StatusBadge';
 import {
   AlertCircle,
   ArrowRight,
+  Calendar,
   Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Download,
+  Eye,
   FileCheck,
   FileSpreadsheet,
   Filter,
   Layers,
   Play,
+  Plus,
   RotateCcw,
   Search,
   ShieldCheck,
   Sliders,
   Sparkles,
+  Split,
   TableProperties,
+  Trash2,
 } from 'lucide-react';
 
 interface ReconciliationWizardProps {
@@ -78,11 +90,41 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   const [loadingRecommendations, setLoadingRecommendations] = useState<boolean>(false);
   const [recError, setRecError] = useState<string | null>(null);
 
-  // --- Step 3: Rules ---
+  // --- Step 3: Rules & Tolerances ---
   const [numericTolerance, setNumericTolerance] = useState<number>(0.0);
+  const [numericPercentageTolerance, setNumericPercentageTolerance] = useState<number>(0.0);
   const [ignoreWhitespace, setIgnoreWhitespace] = useState<boolean>(true);
   const [ignoreCase, setIgnoreCase] = useState<boolean>(false);
   const [enableStatusEquivalence, setEnableStatusEquivalence] = useState<boolean>(true);
+
+  // Date Window Rule state
+  const [dateWindowEnabled, setDateWindowEnabled] = useState<boolean>(false);
+  const [dateWindowSourceField, setDateWindowSourceField] = useState<string>('date');
+  const [dateWindowTargetField, setDateWindowTargetField] = useState<string>('date');
+  const [dateWindowLagBefore, setDateWindowLagBefore] = useState<number>(0);
+  const [dateWindowLagAfter, setDateWindowLagAfter] = useState<number>(3);
+
+  // Where Condition Predicates state
+  const [whereConditions, setWhereConditions] = useState<WhereCondition[]>([]);
+  const [newPredField, setNewPredField] = useState<string>('');
+  const [newPredOp, setNewPredOp] = useState<PredicateOperator>('equal');
+  const [newPredValue, setNewPredValue] = useState<string>('');
+
+  // Split-Payment Aggregation state
+  const [aggregationEnabled, setAggregationEnabled] = useState<boolean>(false);
+  const [aggregationParentAlias, setAggregationParentAlias] = useState<string>('');
+  const [aggregationChildAlias, setAggregationChildAlias] = useState<string>('');
+  const [aggregationParentKey, setAggregationParentKey] = useState<string>('id');
+  const [aggregationChildGroupKey, setAggregationChildGroupKey] = useState<string>('parent_id');
+  const [aggregationParentAmountField, setAggregationParentAmountField] = useState<string>('amount');
+  const [aggregationChildAmountField, setAggregationChildAmountField] = useState<string>('amount');
+  const [aggregationChildReceiptIdField, setAggregationChildReceiptIdField] = useState<string>('');
+  const [aggregationNumericTolerance, setAggregationNumericTolerance] = useState<number>(0.0);
+
+  // Rule Impact Preview state
+  const [previewingRules, setPreviewingRules] = useState<boolean>(false);
+  const [rulePreviewResult, setRulePreviewResult] = useState<RulePreviewResponse | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   // --- Step 4: Verification Results & Running ---
   const [running, setRunning] = useState<boolean>(false);
@@ -165,6 +207,146 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     });
   };
 
+  // Build VersionedRuleConfig for preview and execution
+  const buildRuleConfig = useCallback((): VersionedRuleConfig => {
+    const dateWindowRules: DateWindowRule[] =
+      dateWindowEnabled && dateWindowSourceField && dateWindowTargetField
+        ? [
+            {
+              source_date_field: dateWindowSourceField,
+              target_date_field: dateWindowTargetField,
+              lag_days_before: dateWindowLagBefore,
+              lag_days_after: dateWindowLagAfter,
+              severity: 'WARNING',
+            },
+          ]
+        : [];
+
+    const numericRules: NumericToleranceRule[] =
+      numericPercentageTolerance > 0
+        ? [
+            {
+              source_amount_field: 'amount',
+              target_amount_field: 'amount',
+              absolute_tolerance: numericTolerance,
+              percentage_tolerance: numericPercentageTolerance,
+              tolerance_mode: 'both_or',
+              severity: 'BLOCKING',
+            },
+          ]
+        : [];
+
+    const aggConfig: AggregationConfig | null = aggregationEnabled
+      ? {
+          enabled: true,
+          parent_source_alias:
+            aggregationParentAlias ||
+            (uploadedDatasets[0] ? getAlias(uploadedDatasets[0].id, 0) : 'source_1'),
+          child_source_alias:
+            aggregationChildAlias ||
+            (uploadedDatasets[1] ? getAlias(uploadedDatasets[1].id, 1) : 'source_2'),
+          parent_key: aggregationParentKey,
+          child_grouping_key: aggregationChildGroupKey,
+          parent_amount_field: aggregationParentAmountField,
+          child_amount_field: aggregationChildAmountField,
+          child_receipt_id_field: aggregationChildReceiptIdField || null,
+          numeric_tolerance: aggregationNumericTolerance,
+        }
+      : null;
+
+    return {
+      version: '1.0.0',
+      where_conditions: whereConditions,
+      date_window_rules: dateWindowRules,
+      numeric_tolerance_rules: numericRules,
+      status_transition_rules: enableStatusEquivalence
+        ? [
+            {
+              source_field: 'status',
+              target_field: 'status',
+              allowed_transitions: {
+                settled: ['completed', 'cleared'],
+                completed: ['settled', 'cleared'],
+                active: ['current'],
+                pending: ['processing'],
+              },
+              case_sensitive: false,
+              severity: 'BLOCKING',
+            },
+          ]
+        : [],
+      custom_rules: [],
+      aggregation_config: aggConfig,
+    };
+  }, [
+    dateWindowEnabled,
+    dateWindowSourceField,
+    dateWindowTargetField,
+    dateWindowLagBefore,
+    dateWindowLagAfter,
+    numericTolerance,
+    numericPercentageTolerance,
+    aggregationEnabled,
+    aggregationParentAlias,
+    aggregationChildAlias,
+    aggregationParentKey,
+    aggregationChildGroupKey,
+    aggregationParentAmountField,
+    aggregationChildAmountField,
+    aggregationChildReceiptIdField,
+    aggregationNumericTolerance,
+    uploadedDatasets,
+    getAlias,
+    whereConditions,
+    enableStatusEquivalence,
+  ]);
+
+  const handleAddPredicate = () => {
+    if (!newPredField.trim()) return;
+    setWhereConditions((prev) => [
+      ...prev,
+      {
+        field: newPredField.trim(),
+        operator: newPredOp,
+        value: newPredValue,
+        severity: 'WARNING',
+      },
+    ]);
+    setNewPredField('');
+    setNewPredValue('');
+  };
+
+  const handleRemovePredicate = (idx: number) => {
+    setWhereConditions((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handlePreviewRules = async () => {
+    setPreviewingRules(true);
+    setPreviewError(null);
+    try {
+      const sourcesPayload: SourceDefinition[] = uploadedDatasets.map((ds, idx) => ({
+        alias: getAlias(ds.id, idx),
+        file_id: ds.id,
+        is_primary: ds.id === effectivePrimaryId,
+        key_columns: getKeyCols(ds),
+        field_mapping: {},
+      }));
+
+      const ruleCfg = buildRuleConfig();
+      const res = await api.previewRules(project.id, {
+        rules: ruleCfg,
+        sources: sourcesPayload,
+        unified_keys: unifiedKeys,
+        sample_size: 100,
+      });
+      setRulePreviewResult(res);
+    } catch (err: any) {
+      setPreviewError(err.message || 'Failed to preview rules.');
+    } finally {
+      setPreviewingRules(false);
+    }
+  };
+
   // Execute multi-source reconciliation
   const handleExecuteVerification = async () => {
     setRunning(true);
@@ -190,6 +372,8 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         }
       : undefined;
 
+    const ruleConfig = buildRuleConfig();
+
     const payload: MultiSourceVerificationRequest = {
       sources: sourcesPayload,
       unified_keys: unifiedKeys,
@@ -198,6 +382,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
       ignore_case: ignoreCase,
       include_identical: true,
       status_rules: statusRuleConfig,
+      rule_config: ruleConfig,
     };
 
     try {
@@ -555,28 +740,119 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               </p>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 28 }}>
+            {/* Rules Cards Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 20 }}>
               {/* Tolerance Rule */}
               <div className="card" style={{ padding: '16px' }}>
-                <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>Numeric &amp; Currency Tolerance</h4>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>Numeric &amp; Currency Tolerances</h4>
                 <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
-                  Acceptable difference when comparing floating-point numbers or monetary amounts across systems.
+                  Acceptable thresholds when comparing monetary amounts or numerical measures across systems.
                 </p>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span>±</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="form-input"
-                    style={{ maxWidth: 120 }}
-                    value={numericTolerance}
-                    onChange={(e) => setNumericTolerance(parseFloat(e.target.value) || 0)}
-                  />
-                  <span className="text-dim" style={{ fontSize: '0.82rem' }}>
-                    {numericTolerance === 0 ? '(Strict exact match)' : `(Differences ≤ ${numericTolerance} pass as identical)`}
-                  </span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ minWidth: 100, fontSize: '0.85rem' }}>Absolute (±):</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="form-input"
+                      style={{ maxWidth: 100 }}
+                      value={numericTolerance}
+                      onChange={(e) => setNumericTolerance(parseFloat(e.target.value) || 0)}
+                    />
+                    <span className="text-dim" style={{ fontSize: '0.78rem' }}>
+                      {numericTolerance === 0 ? '(Exact match)' : `(Diff ≤ ${numericTolerance})`}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ minWidth: 100, fontSize: '0.85rem' }}>Percentage (%):</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="100"
+                      className="form-input"
+                      style={{ maxWidth: 100 }}
+                      value={numericPercentageTolerance}
+                      onChange={(e) => setNumericPercentageTolerance(parseFloat(e.target.value) || 0)}
+                    />
+                    <span className="text-dim" style={{ fontSize: '0.78rem' }}>
+                      {numericPercentageTolerance === 0 ? '(0% tolerance)' : `(Diff ≤ ${numericPercentageTolerance}%)`}
+                    </span>
+                  </div>
                 </div>
+              </div>
+
+              {/* Settlement Date Window Rule */}
+              <div className="card" style={{ padding: '16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Calendar size={16} className="text-accent" /> Settlement Date Window
+                  </h4>
+                  <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={dateWindowEnabled}
+                      onChange={(e) => setDateWindowEnabled(e.target.checked)}
+                    />
+                    <span style={{ fontSize: '0.8rem' }}>{dateWindowEnabled ? 'Active' : 'Off'}</span>
+                  </label>
+                </div>
+                <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                  Verify transaction lag (target date must fall within [source - N days, source + M days]).
+                </p>
+                {dateWindowEnabled && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: '0.82rem' }}>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Source Date Col</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={dateWindowSourceField}
+                          onChange={(e) => setDateWindowSourceField(e.target.value)}
+                          placeholder="e.g. date, txn_date"
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Target Date Col</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={dateWindowTargetField}
+                          onChange={(e) => setDateWindowTargetField(e.target.value)}
+                          placeholder="e.g. date, settled_date"
+                        />
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Lag Before (Days)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={dateWindowLagBefore}
+                          onChange={(e) => setDateWindowLagBefore(parseInt(e.target.value, 10) || 0)}
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Lag After (Days)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={dateWindowLagAfter}
+                          onChange={(e) => setDateWindowLagAfter(parseInt(e.target.value, 10) || 0)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Status Equivalence Rule */}
@@ -625,6 +901,314 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   <span>Ignore case sensitivity</span>
                 </label>
               </div>
+            </div>
+
+            {/* Compound Predicates (Where Conditions) */}
+            <div className="card" style={{ padding: '16px', marginBottom: 20 }}>
+              <h4 style={{ margin: '0 0 6px 0', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Filter size={16} className="text-accent" /> Structured Record Predicates &amp; Compound Filters
+              </h4>
+              <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                Pre-filter or restrict dataset records before evaluating cross-source reconciliation.
+              </p>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Field (e.g. currency, status)"
+                  style={{ width: 180, fontSize: '0.85rem' }}
+                  value={newPredField}
+                  onChange={(e) => setNewPredField(e.target.value)}
+                />
+                <select
+                  className="form-select"
+                  style={{ width: 140, fontSize: '0.85rem' }}
+                  value={newPredOp}
+                  onChange={(e) => setNewPredOp(e.target.value as PredicateOperator)}
+                >
+                  <option value="equal">equal (==)</option>
+                  <option value="not_equal">not_equal (!=)</option>
+                  <option value="greater_than">greater_than (&gt;)</option>
+                  <option value="less_than">less_than (&lt;)</option>
+                  <option value="in">in (comma-sep)</option>
+                  <option value="not_in">not_in (comma-sep)</option>
+                  <option value="regex">regex matches</option>
+                </select>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Target value"
+                  style={{ flex: 1, minWidth: 150, fontSize: '0.85rem' }}
+                  value={newPredValue}
+                  onChange={(e) => setNewPredValue(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={handleAddPredicate}
+                  disabled={!newPredField.trim()}
+                >
+                  <Plus size={14} /> Add Predicate
+                </button>
+              </div>
+
+              {whereConditions.length > 0 ? (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {whereConditions.map((cond, idx) => (
+                    <span
+                      key={idx}
+                      className="badge"
+                      style={{
+                        backgroundColor: 'var(--bg-subtle)',
+                        border: '1px solid var(--border-color)',
+                        padding: '6px 10px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        fontSize: '0.82rem',
+                      }}
+                    >
+                      <code>{cond.field}</code>
+                      <span className="text-dim">{cond.operator}</span>
+                      <strong>{String(cond.value)}</strong>
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePredicate(idx)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', color: 'var(--danger-text)' }}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-dim" style={{ fontSize: '0.82rem', margin: 0 }}>
+                  No predicates defined. All records from all sources will participate in reconciliation.
+                </p>
+              )}
+            </div>
+
+            {/* Split-Payment / Aggregation Toggle & Configuration */}
+            <div className="card" style={{ padding: '16px', marginBottom: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Split size={16} className="text-accent" /> One-to-Many (1:N) &amp; Split-Payment Aggregation
+                </h4>
+                <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={aggregationEnabled}
+                    onChange={(e) => setAggregationEnabled(e.target.checked)}
+                  />
+                  <span style={{ fontSize: '0.8rem' }}>{aggregationEnabled ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </div>
+              <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                Match a single parent order/invoice against multiple installment or settlement receipts on a secondary source.
+              </p>
+              {aggregationEnabled && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, fontSize: '0.82rem' }}>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Parent Source Alias</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationParentAlias || (uploadedDatasets[0] ? getAlias(uploadedDatasets[0].id, 0) : '')}
+                      onChange={(e) => setAggregationParentAlias(e.target.value)}
+                      placeholder="e.g. erp, invoice"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Child / Installments Alias</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationChildAlias || (uploadedDatasets[1] ? getAlias(uploadedDatasets[1].id, 1) : '')}
+                      onChange={(e) => setAggregationChildAlias(e.target.value)}
+                      placeholder="e.g. gateway, bank"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Parent Key Field</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationParentKey}
+                      onChange={(e) => setAggregationParentKey(e.target.value)}
+                      placeholder="e.g. id, invoice_id"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Child Grouping Key</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationChildGroupKey}
+                      onChange={(e) => setAggregationChildGroupKey(e.target.value)}
+                      placeholder="e.g. parent_id, order_id"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Parent Amount Field</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationParentAmountField}
+                      onChange={(e) => setAggregationParentAmountField(e.target.value)}
+                      placeholder="e.g. total_amount, amount"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Child Installment Amount Field</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationChildAmountField}
+                      onChange={(e) => setAggregationChildAmountField(e.target.value)}
+                      placeholder="e.g. installment_amount, amount"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Child Receipt ID Field (optional)</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationChildReceiptIdField}
+                      onChange={(e) => setAggregationChildReceiptIdField(e.target.value)}
+                      placeholder="e.g. receipt_id, txn_id"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', marginBottom: 2 }}>Sum Tolerance (±)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="form-input"
+                      style={{ width: '100%', padding: '4px 8px' }}
+                      value={aggregationNumericTolerance}
+                      onChange={(e) => setAggregationNumericTolerance(parseFloat(e.target.value) || 0)}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Live Rule Dry-Run / Preview Panel */}
+            <div className="card" style={{ padding: '16px', marginBottom: 24, border: '1px solid var(--accent-border, var(--border-color))' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                <div>
+                  <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Sparkles size={16} className="text-accent" /> Live Rule Impact Dry-Run &amp; Simulation
+                  </h4>
+                  <p className="text-dim" style={{ fontSize: '0.82rem', margin: '2px 0 0 0' }}>
+                    Evaluate your active rules against uploaded sources to view anticipated pass rates before executing.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void handlePreviewRules()}
+                  disabled={previewingRules}
+                >
+                  {previewingRules ? <span className="spinner" /> : <Eye size={14} />}
+                  Preview Rule Impact
+                </button>
+              </div>
+
+              {previewError && (
+                <div className="alert alert-error" style={{ marginBottom: 12 }}>
+                  <AlertCircle size={15} />
+                  <span>{previewError}</span>
+                </div>
+              )}
+
+              {rulePreviewResult && (
+                <div style={{ backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 12 }}>
+                    <div>
+                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Evaluated</span>
+                      <span className="metric-value" style={{ fontSize: '1.1rem' }}>
+                        {rulePreviewResult.total_evaluated}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Projected Passes</span>
+                      <span className="metric-value text-success" style={{ fontSize: '1.1rem' }}>
+                        {rulePreviewResult.passed_count}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Projected Exceptions</span>
+                      <span className="metric-value text-danger" style={{ fontSize: '1.1rem' }}>
+                        {rulePreviewResult.exception_count}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Pass Rate</span>
+                      <span className="metric-value" style={{ fontSize: '1.1rem' }}>
+                        {rulePreviewResult.total_evaluated > 0
+                          ? `${((rulePreviewResult.passed_count / rulePreviewResult.total_evaluated) * 100).toFixed(1)}%`
+                          : '100%'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {rulePreviewResult.exceptions_by_rule && Object.keys(rulePreviewResult.exceptions_by_rule).length > 0 && (
+                    <div style={{ marginBottom: 10 }}>
+                      <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-dim)', marginRight: 8 }}>
+                        Reason Breakdown:
+                      </span>
+                      {Object.entries(rulePreviewResult.exceptions_by_rule).map(([k, count]) => (
+                        <span key={k} className="badge badge-warning" style={{ fontSize: '0.75rem', marginRight: 6 }}>
+                          {k}: {String(count)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {rulePreviewResult.sample_discrepancies && rulePreviewResult.sample_discrepancies.length > 0 && (
+                    <div style={{ fontSize: '0.8rem' }}>
+                      <span style={{ fontWeight: 600, color: 'var(--text-dim)', display: 'block', marginBottom: 4 }}>
+                        Sample Exception Records:
+                      </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {rulePreviewResult.sample_discrepancies.slice(0, 3).map((item, idx) => (
+                          <div
+                            key={idx}
+                            style={{
+                              padding: '6px 8px',
+                              backgroundColor: 'var(--bg-card)',
+                              borderRadius: 'var(--radius-xs)',
+                              border: '1px solid var(--border-color)',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.78rem' }}>
+                              {item.key ? JSON.stringify(item.key) : `Row ${item.source_row ?? idx + 1}`}
+                            </span>
+                            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                              <StatusBadge status={item.status} />
+                              <span className="text-dim" style={{ fontSize: '0.75rem' }}>
+                                {item.reason || item.message}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {runError && (
@@ -740,6 +1324,8 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   <option value="field_mismatch">Field mismatches</option>
                   <option value="missing_record">Missing records</option>
                   <option value="duplicate_key">Duplicate keys</option>
+                  <option value="aggregation_mismatch">Aggregation mismatches</option>
+                  <option value="rule_violation">Rule violations</option>
                 </select>
 
                 <select
@@ -752,6 +1338,10 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   <option value="field_mismatch">Field mismatch</option>
                   <option value="missing_in_target">Missing in target</option>
                   <option value="missing_in_source">Missing in primary</option>
+                  <option value="partial_payment">Partial payment</option>
+                  <option value="overpayment">Overpayment</option>
+                  <option value="unmatched_split_record">Orphan split record</option>
+                  <option value="duplicate_receipt">Duplicate receipt</option>
                 </select>
               </div>
             </div>
@@ -806,6 +1396,36 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                           )}
                         </td>
                         <td>
+                          {row.child_records && row.child_records.length > 0 && (
+                            <div style={{ marginBottom: 6 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                                <span className="badge badge-accent" style={{ fontSize: '0.75rem' }}>
+                                  {row.child_records.length} Split Installments
+                                </span>
+                                {row.aggregated_amount != null && row.expected_amount != null && (
+                                  <span style={{ fontSize: '0.78rem', fontFamily: 'var(--font-mono)' }}>
+                                    Sum: <strong>${row.aggregated_amount.toFixed(2)}</strong> (Parent: ${row.expected_amount.toFixed(2)})
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                {row.child_records.map((c, i) => (
+                                  <span
+                                    key={i}
+                                    className="badge"
+                                    style={{
+                                      backgroundColor: 'var(--bg-subtle)',
+                                      fontSize: '0.72rem',
+                                      padding: '2px 6px',
+                                      fontFamily: 'var(--font-mono)',
+                                    }}
+                                  >
+                                    #{c.source_row_index} {c.receipt_id ? `rcpt:${c.receipt_id}` : `rec:${c.record_id}`}: ${c.amount}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                           {row.field_differences && row.field_differences.length > 0 ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                               {row.field_differences.map((d, i) => (
