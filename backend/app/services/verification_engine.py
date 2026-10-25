@@ -21,10 +21,14 @@ from app.models.source_file import SourceFile
 from app.models.user import User
 from app.models.verification_run import VerificationRun, VerificationDiscrepancy
 from app.schemas.preprocessing import ColumnMetadata, PreprocessingConfig, ValidationIssue
+import re
+from rapidfuzz import fuzz
+
 from app.schemas.result import (
     DiscrepancyCategory,
     FieldDifference,
     MatchStatus,
+    ReasonCode,
     VerificationRequest,
     VerificationResponse,
     VerificationResultItem,
@@ -41,6 +45,207 @@ from app.utils.normalization import (
     parse_numeric,
     LEADING_ZERO_REGEX,
 )
+
+NAME_COLUMN_KEYWORDS = {
+    "name",
+    "full_name",
+    "first_name",
+    "last_name",
+    "student_name",
+    "customer_name",
+    "employee_name",
+    "client_name",
+    "person_name",
+}
+
+STATUS_COLUMN_KEYWORDS = {
+    "status",
+    "enrollment_status",
+    "account_status",
+    "state",
+    "user_status",
+    "membership_status",
+}
+
+
+def normalize_name_tokens(name: Any) -> List[str]:
+    """Clean punctuation, normalize whitespace, and extract lowercase word tokens."""
+    if name is None:
+        return []
+    s = str(name).strip()
+    cleaned = re.sub(r"[^\w\s]", " ", s.lower())
+    return [t for t in cleaned.split() if t]
+
+
+def check_initials_match(tokens1: List[str], tokens2: List[str]) -> bool:
+    """
+    Check if one name is an initial variation of the other.
+    E.g., ['j', 'doe'] vs ['john', 'doe']
+    or ['j', 'f', 'kennedy'] vs ['john', 'f', 'kennedy']
+    """
+    if len(tokens1) != len(tokens2) or not tokens1:
+        return False
+    has_initial = any(len(t) == 1 for t in tokens1 + tokens2)
+    if not has_initial:
+        return False
+    for t1, t2 in zip(tokens1, tokens2):
+        if t1 == t2:
+            continue
+        if len(t1) == 1 and len(t2) > 1 and t2.startswith(t1):
+            continue
+        if len(t2) == 1 and len(t1) > 1 and t1.startswith(t2):
+            continue
+        return False
+    return True
+
+
+def evaluate_name_similarity(name1: Any, name2: Any) -> Tuple[bool, float, Optional[str]]:
+    """
+    Evaluate similarity between two name values.
+    Returns (is_candidate, score, reason):
+      - is_candidate: True if initials, token reorder, or high fuzzy similarity
+      - score: 0.0 to 100.0
+      - reason: 'exact_case_insensitive', 'token_reorder', 'initials_variation', 'fuzzy_similarity', or None
+    """
+    if name1 is None or name2 is None:
+        return False, 0.0, None
+    s1, s2 = str(name1).strip(), str(name2).strip()
+    if not s1 or not s2:
+        return False, 0.0, None
+    if s1.lower() == s2.lower():
+        return True, 100.0, "exact_case_insensitive"
+
+    tokens1 = normalize_name_tokens(s1)
+    tokens2 = normalize_name_tokens(s2)
+    if not tokens1 or not tokens2:
+        return False, 0.0, None
+
+    # 1. Token reordering: e.g. "John Doe" vs "Doe, John"
+    if sorted(tokens1) == sorted(tokens2):
+        return True, 100.0, "token_reorder"
+
+    # 2. Initials variation: e.g. "J. Doe" vs "John Doe", "Doe, J." vs "John Doe"
+    if check_initials_match(sorted(tokens1), sorted(tokens2)):
+        return True, 90.0, "initials_variation"
+
+    # 3. RapidFuzz token sorting and set ratio
+    clean1 = " ".join(tokens1)
+    clean2 = " ".join(tokens2)
+    sort_score = float(fuzz.token_sort_ratio(clean1, clean2))
+    set_score = float(fuzz.token_set_ratio(clean1, clean2))
+    score = max(sort_score, set_score)
+    if score >= 80.0:
+        return True, score, "fuzzy_similarity"
+
+    return False, score, None
+
+
+def is_status_column(col_name: str, status_rules: Optional[Dict[str, Any]] = None) -> bool:
+    """Determine if a column represents a status or lifecycle state."""
+    col_clean = col_name.strip().lower()
+    if status_rules:
+        target_col = status_rules.get("column") or status_rules.get("status_column")
+        if target_col and str(target_col).strip().lower() == col_clean:
+            return True
+    return col_clean in STATUS_COLUMN_KEYWORDS or col_clean.endswith("_status")
+
+
+def is_name_column(col_name: str, fuzzy_columns: Optional[List[str]] = None) -> bool:
+    """Determine if a column represents a personal or entity name."""
+    col_clean = col_name.strip().lower()
+    if fuzzy_columns:
+        if any(c.strip().lower() == col_clean for c in fuzzy_columns):
+            return True
+    return col_clean in NAME_COLUMN_KEYWORDS or col_clean.endswith("_name")
+
+
+ID_COLUMN_KEYWORDS = {
+    "id",
+    "key",
+    "uuid",
+    "code",
+    "identifier",
+    "pk",
+    "record_id",
+    "student_id",
+    "employee_id",
+    "emp_id",
+    "customer_id",
+    "user_id",
+    "client_id",
+    "account_id",
+    "account_number",
+    "ssn",
+    "national_id",
+}
+
+
+def is_id_column(col_name: str, key_columns: Optional[List[str]] = None) -> bool:
+    """Determine if a column represents an identifier or primary key."""
+    col_clean = col_name.strip().lower()
+    if key_columns and any(k.strip().lower() == col_clean for k in key_columns):
+        return True
+    if col_clean in ID_COLUMN_KEYWORDS:
+        return True
+    return col_clean.endswith("_id") or col_clean.endswith("_key") or col_clean.endswith("_code")
+
+
+def evaluate_status_rule(
+    src_val: Any,
+    tgt_val: Any,
+    status_rules: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Evaluate whether src_status and tgt_status are compatible under status rules.
+    Returns (is_permitted, reason_if_mismatch).
+    If values are equal (case-insensitive, whitespace-trimmed), returns (True, None).
+    If values differ:
+      - If status_rules allows this pairing, returns (True, None).
+      - Otherwise, returns (False, error_message).
+    """
+    s_clean = str(src_val).strip().lower() if src_val is not None else ""
+    t_clean = str(tgt_val).strip().lower() if tgt_val is not None else ""
+
+    if s_clean == t_clean:
+        return True, None
+
+    if not status_rules:
+        return False, f"Status mismatch: source '{src_val}' vs target '{tgt_val}'"
+
+    if status_rules.get("permit_suspended") is True:
+        if t_clean in ("suspended", "dropped", "inactive") or s_clean in ("suspended", "dropped", "inactive"):
+            return True, None
+
+    allowed_pairs = (
+        status_rules.get("allowed_pairs")
+        or status_rules.get("equivalent_pairs")
+        or status_rules.get("valid_pairs")
+        or []
+    )
+    for pair in allowed_pairs:
+        if len(pair) == 2:
+            p0 = str(pair[0]).strip().lower()
+            p1 = str(pair[1]).strip().lower()
+            if (s_clean == p0 and t_clean == p1) or (s_clean == p1 and t_clean == p0):
+                return True, None
+
+    rules_dict = (
+        status_rules.get("allowed_transitions")
+        or status_rules.get("transitions")
+        or status_rules.get("rules")
+        or status_rules
+    )
+    if isinstance(rules_dict, dict):
+        allowed = rules_dict.get(s_clean) or rules_dict.get(str(src_val))
+        if allowed is not None:
+            if isinstance(allowed, (list, tuple, set)):
+                allowed_clean = [str(x).strip().lower() for x in allowed]
+                if t_clean in allowed_clean:
+                    return True, None
+            elif str(allowed).strip().lower() == t_clean:
+                return True, None
+
+    return False, f"Status rule violation: '{src_val}' cannot transition or match to '{tgt_val}'"
 
 
 def normalize_key_value(
@@ -210,6 +415,14 @@ def verify_datasets(
     ignore_case: bool = False,
     null_values: Optional[List[str]] = None,
     include_identical: bool = True,
+    enable_fuzzy_matching: bool = False,
+    fuzzy_match_columns: Optional[List[str]] = None,
+    fuzzy_threshold: float = 80.0,
+    status_rules: Optional[Dict[str, Any]] = None,
+    source_file_id: Optional[str] = None,
+    target_file_id: Optional[str] = None,
+    excluded_source_rows: Optional[List[int]] = None,
+    excluded_target_rows: Optional[List[int]] = None,
 ) -> Tuple[VerificationSummary, List[VerificationResultItem], List[VerificationResultItem], List[ValidationIssue], List[str]]:
     """
     Core record matching and field-level comparison engine.
@@ -226,6 +439,14 @@ def verify_datasets(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="At least one non-empty matching key column must be specified.",
         )
+
+    # Filter out quarantined / excluded rows before matching
+    if excluded_source_rows:
+        ex_s = set(excluded_source_rows)
+        source_records = [r for r in source_records if r[0] not in ex_s]
+    if excluded_target_rows:
+        ex_t = set(excluded_target_rows)
+        target_records = [r for r in target_records if r[0] not in ex_t]
 
     clean_key_columns = [k.strip() for k in key_columns if k.strip()]
     column_mapping = column_mapping or {}
@@ -267,6 +488,7 @@ def verify_datasets(
             identical_matches=0,
             field_mismatches=0,
             records_with_differences=0,
+            needs_review_records=0,
             unmatched_source_records=0,
             unmatched_target_records=0,
             duplicate_source_records=0,
@@ -359,7 +581,6 @@ def verify_datasets(
                 )
 
     # 5. Group source and target records by normalized key tuple
-    # Key tuple -> list of (row_number, record)
     source_key_groups: Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
     target_key_groups: Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
     key_display_dicts: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
@@ -422,6 +643,7 @@ def verify_datasets(
     # Counters
     identical_matches = 0
     field_mismatches = 0
+    needs_review_records = 0
     unmatched_source_records = 0
     unmatched_target_records = 0
     duplicate_source_records = 0
@@ -429,6 +651,10 @@ def verify_datasets(
     duplicate_source_keys_count = 0
     duplicate_target_keys_count = 0
     conflicting_duplicate_records = 0
+
+    # Collect single unmatched records for candidate evaluation if enabled
+    single_unmatched_src: List[Tuple[Tuple[Any, ...], int, Dict[str, Any]]] = []
+    single_unmatched_tgt: List[Tuple[Tuple[Any, ...], int, Dict[str, Any]]] = []
 
     for k_tuple in all_keys:
         s_list = source_key_groups.get(k_tuple, [])
@@ -438,16 +664,110 @@ def verify_datasets(
         s_count = len(s_list)
         t_count = len(t_list)
 
-        # Case 1: Unique 1-to-1 match
+        # Case 1: Unique 1-to-1 match on key
         if s_count == 1 and t_count == 1:
             s_row_num, s_rec = s_list[0]
             t_row_num, t_rec = t_list[0]
 
+            lineage = {
+                "source_row_index": s_row_num,
+                "target_row_index": t_row_num,
+                "source_file_id": source_file_id,
+                "target_file_id": target_file_id,
+                "key_columns": clean_key_columns,
+                "key_values": k_dict,
+            }
+
             diffs: List[FieldDifference] = []
+            has_status_mismatch = False
+            has_id_conflict = False
+            fuzzy_name_scores: List[float] = []
+
             for s_col, t_col in field_pairs:
                 s_val = s_rec.get(s_col)
                 t_val = t_rec.get(t_col)
 
+                # 1. State-aware verification for status columns
+                if is_status_column(s_col, status_rules):
+                    is_permitted, status_msg = evaluate_status_rule(s_val, t_val, status_rules)
+                    if not is_permitted:
+                        has_status_mismatch = True
+                        diffs.append(
+                            FieldDifference(
+                                field_name=s_col,
+                                source_field=s_col,
+                                target_field=t_col,
+                                source_value=s_val,
+                                target_value=t_val,
+                                source_type=type(s_val).__name__ if s_val is not None else "null",
+                                target_type=type(t_val).__name__ if t_val is not None else "null",
+                                difference_type="status_mismatch",
+                                reason_code=ReasonCode.STATUS_MISMATCH,
+                                message=status_msg or f"Status mismatch in '{s_col}': '{s_val}' vs '{t_val}'",
+                            )
+                        )
+                        continue
+                    elif str(s_val).strip().lower() != str(t_val).strip().lower():
+                        # Status values differed but were explicitly permitted by rule!
+                        continue
+
+                # 2. Conflicting identifier check
+                if is_id_column(s_col, clean_key_columns):
+                    is_match, diff_type, s_type, t_type = compare_field_values(
+                        src_val=s_val,
+                        tgt_val=t_val,
+                        null_set=null_set,
+                        numeric_tolerance=0.0,
+                        ignore_whitespace=ignore_whitespace,
+                        ignore_case=ignore_case,
+                    )
+                    if not is_match:
+                        has_id_conflict = True
+                        diffs.append(
+                            FieldDifference(
+                                field_name=s_col,
+                                source_field=s_col,
+                                target_field=t_col,
+                                source_value=s_val,
+                                target_value=t_val,
+                                source_type=s_type,
+                                target_type=t_type,
+                                difference_type="id_conflict",
+                                reason_code=ReasonCode.ID_CONFLICT,
+                                message=f"Conflicting identifier in '{s_col}': '{s_val}' vs '{t_val}'",
+                            )
+                        )
+                        continue
+
+                # 3. Name variation handling (initials, token reordering, RapidFuzz score)
+                if is_name_column(s_col, fuzzy_match_columns):
+                    s_str = str(s_val).strip() if s_val is not None else ""
+                    t_str = str(t_val).strip() if t_val is not None else ""
+                    if s_str != t_str:
+                        is_cand, score, cand_reason = evaluate_name_similarity(s_val, t_val)
+                        if is_cand and score >= (fuzzy_threshold if enable_fuzzy_matching else 80.0):
+                            fuzzy_name_scores.append(score)
+                            diffs.append(
+                                FieldDifference(
+                                    field_name=s_col,
+                                    source_field=s_col,
+                                    target_field=t_col,
+                                    source_value=s_val,
+                                    target_value=t_val,
+                                    source_type="string",
+                                    target_type="string",
+                                    difference_type="fuzzy_name_review",
+                                    reason_code=ReasonCode.FUZZY_NAME_REVIEW,
+                                    confidence_score=round(score / 100.0, 4),
+                                    message=(
+                                        f"Name variation in '{s_col}' ({cand_reason}, similarity {score:.1f}%): "
+                                        f"'{s_val}' vs '{t_val}'. Review required."
+                                    ),
+                                )
+                            )
+                            continue
+
+                # 4. Standard comparison for remaining fields
                 is_match, diff_type, s_type, t_type = compare_field_values(
                     src_val=s_val,
                     tgt_val=t_val,
@@ -457,6 +777,13 @@ def verify_datasets(
                     ignore_case=ignore_case,
                 )
                 if not is_match:
+                    num_s, _ = parse_numeric(s_val)
+                    num_t, _ = parse_numeric(t_val)
+                    if num_s is not None and num_t is not None:
+                        field_reason = ReasonCode.AMOUNT_TOLERANCE_EXCEEDED
+                    else:
+                        field_reason = ReasonCode.FIELD_MISMATCH
+
                     diffs.append(
                         FieldDifference(
                             field_name=s_col,
@@ -467,6 +794,7 @@ def verify_datasets(
                             source_type=s_type,
                             target_type=t_type,
                             difference_type=diff_type or "value_mismatch",
+                            reason_code=field_reason,
                             message=f"Difference in '{s_col}': '{s_val}' vs '{t_val}'",
                         )
                     )
@@ -477,10 +805,17 @@ def verify_datasets(
                     key_values=k_dict,
                     match_status=MatchStatus.IDENTICAL,
                     discrepancy_category=DiscrepancyCategory.NONE,
+                    reason_code=ReasonCode.EXACT_MATCH,
+                    confidence_score=1.0,
                     source_row_number=s_row_num,
                     target_row_number=t_row_num,
+                    source_row_index=s_row_num,
+                    target_row_index=t_row_num,
                     source_row_numbers=[s_row_num],
                     target_row_numbers=[t_row_num],
+                    source_file_id=source_file_id,
+                    target_file_id=target_file_id,
+                    lineage=lineage,
                     source_record=s_rec,
                     target_record=t_rec,
                     field_differences=[],
@@ -488,16 +823,98 @@ def verify_datasets(
                 )
                 if include_identical:
                     results.append(item)
-            else:
+            elif has_status_mismatch:
                 field_mismatches += 1
                 item = VerificationResultItem(
                     key_values=k_dict,
                     match_status=MatchStatus.FIELD_MISMATCH,
                     discrepancy_category=DiscrepancyCategory.FIELD_MISMATCH,
+                    reason_code=ReasonCode.STATUS_MISMATCH,
+                    confidence_score=0.0,
                     source_row_number=s_row_num,
                     target_row_number=t_row_num,
+                    source_row_index=s_row_num,
+                    target_row_index=t_row_num,
                     source_row_numbers=[s_row_num],
                     target_row_numbers=[t_row_num],
+                    source_file_id=source_file_id,
+                    target_file_id=target_file_id,
+                    lineage=lineage,
+                    source_record=s_rec,
+                    target_record=t_rec,
+                    field_differences=diffs,
+                    message="Status mismatch detected: cannot pass as verified.",
+                )
+                results.append(item)
+                discrepancies.append(item)
+            elif has_id_conflict:
+                needs_review_records += 1
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.NEEDS_REVIEW,
+                    discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                    reason_code=ReasonCode.ID_CONFLICT,
+                    confidence_score=0.0,
+                    source_row_number=s_row_num,
+                    target_row_number=t_row_num,
+                    source_row_index=s_row_num,
+                    target_row_index=t_row_num,
+                    source_row_numbers=[s_row_num],
+                    target_row_numbers=[t_row_num],
+                    source_file_id=source_file_id,
+                    target_file_id=target_file_id,
+                    lineage=lineage,
+                    source_record=s_rec,
+                    target_record=t_rec,
+                    field_differences=diffs,
+                    message="Conflicting identifier detected; cannot auto-verify.",
+                )
+                results.append(item)
+                discrepancies.append(item)
+            elif fuzzy_name_scores and all(d.reason_code == ReasonCode.FUZZY_NAME_REVIEW for d in diffs):
+                needs_review_records += 1
+                avg_score = sum(fuzzy_name_scores) / len(fuzzy_name_scores)
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.NEEDS_REVIEW,
+                    discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                    reason_code=ReasonCode.FUZZY_NAME_REVIEW,
+                    confidence_score=round(avg_score / 100.0, 4),
+                    source_row_number=s_row_num,
+                    target_row_number=t_row_num,
+                    source_row_index=s_row_num,
+                    target_row_index=t_row_num,
+                    source_row_numbers=[s_row_num],
+                    target_row_numbers=[t_row_num],
+                    source_file_id=source_file_id,
+                    target_file_id=target_file_id,
+                    lineage=lineage,
+                    source_record=s_rec,
+                    target_record=t_rec,
+                    field_differences=diffs,
+                    message=f"Name variation detected (score {avg_score:.1f}%): enters NEEDS_REVIEW.",
+                )
+                results.append(item)
+                discrepancies.append(item)
+            else:
+                field_mismatches += 1
+                has_amt = any(d.reason_code == ReasonCode.AMOUNT_TOLERANCE_EXCEEDED for d in diffs)
+                rec_reason = ReasonCode.AMOUNT_TOLERANCE_EXCEEDED if has_amt else ReasonCode.FIELD_MISMATCH
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.FIELD_MISMATCH,
+                    discrepancy_category=DiscrepancyCategory.FIELD_MISMATCH,
+                    reason_code=rec_reason,
+                    confidence_score=0.0,
+                    source_row_number=s_row_num,
+                    target_row_number=t_row_num,
+                    source_row_index=s_row_num,
+                    target_row_index=t_row_num,
+                    source_row_numbers=[s_row_num],
+                    target_row_numbers=[t_row_num],
+                    source_file_id=source_file_id,
+                    target_file_id=target_file_id,
+                    lineage=lineage,
                     source_record=s_rec,
                     target_record=t_rec,
                     field_differences=diffs,
@@ -506,59 +923,40 @@ def verify_datasets(
                 results.append(item)
                 discrepancies.append(item)
 
-        # Case 2: Only in source (unique key in source, absent in target)
+        # Case 2: Only in source (defer to candidate search if fuzzy matching enabled)
         elif s_count == 1 and t_count == 0:
-            s_row_num, s_rec = s_list[0]
-            unmatched_source_records += 1
-            item = VerificationResultItem(
-                key_values=k_dict,
-                match_status=MatchStatus.MISSING_IN_TARGET,
-                discrepancy_category=DiscrepancyCategory.MISSING_RECORD,
-                source_row_number=s_row_num,
-                target_row_number=None,
-                source_row_numbers=[s_row_num],
-                target_row_numbers=[],
-                source_record=s_rec,
-                target_record=None,
-                field_differences=[],
-                message="Record present in source dataset but missing in target dataset.",
-            )
-            results.append(item)
-            discrepancies.append(item)
+            single_unmatched_src.append((k_tuple, s_list[0][0], s_list[0][1]))
 
-        # Case 3: Only in target (unique key in target, absent in source)
+        # Case 3: Only in target (defer to candidate search if fuzzy matching enabled)
         elif s_count == 0 and t_count == 1:
-            t_row_num, t_rec = t_list[0]
-            unmatched_target_records += 1
-            item = VerificationResultItem(
-                key_values=k_dict,
-                match_status=MatchStatus.MISSING_IN_SOURCE,
-                discrepancy_category=DiscrepancyCategory.MISSING_RECORD,
-                source_row_number=None,
-                target_row_number=t_row_num,
-                source_row_numbers=[],
-                target_row_numbers=[t_row_num],
-                source_record=None,
-                target_record=t_rec,
-                field_differences=[],
-                message="Record present in target dataset but missing in source dataset.",
-            )
-            results.append(item)
-            discrepancies.append(item)
+            single_unmatched_tgt.append((k_tuple, t_list[0][0], t_list[0][1]))
 
         # Case 4: Duplicate in source, absent in target
         elif s_count > 1 and t_count == 0:
             s_row_nums = [r[0] for r in s_list]
             duplicate_source_records += s_count
             duplicate_source_keys_count += 1
+            lineage = {
+                "source_row_indexes": s_row_nums,
+                "source_file_id": source_file_id,
+                "key_columns": clean_key_columns,
+                "key_values": k_dict,
+            }
             item = VerificationResultItem(
                 key_values=k_dict,
                 match_status=MatchStatus.DUPLICATE_KEY_SOURCE,
                 discrepancy_category=DiscrepancyCategory.DUPLICATE_KEY,
+                reason_code=ReasonCode.DUPLICATE_KEY_SOURCE,
+                confidence_score=0.0,
                 source_row_number=s_row_nums[0],
                 target_row_number=None,
+                source_row_index=s_row_nums[0],
+                target_row_index=None,
                 source_row_numbers=s_row_nums,
                 target_row_numbers=[],
+                source_file_id=source_file_id,
+                target_file_id=target_file_id,
+                lineage=lineage,
                 source_record=s_list[0][1],
                 target_record=None,
                 field_differences=[],
@@ -572,14 +970,27 @@ def verify_datasets(
             t_row_nums = [r[0] for r in t_list]
             duplicate_target_records += t_count
             duplicate_target_keys_count += 1
+            lineage = {
+                "target_row_indexes": t_row_nums,
+                "target_file_id": target_file_id,
+                "key_columns": clean_key_columns,
+                "key_values": k_dict,
+            }
             item = VerificationResultItem(
                 key_values=k_dict,
                 match_status=MatchStatus.DUPLICATE_KEY_TARGET,
                 discrepancy_category=DiscrepancyCategory.DUPLICATE_KEY,
+                reason_code=ReasonCode.DUPLICATE_KEY_TARGET,
+                confidence_score=0.0,
                 source_row_number=None,
                 target_row_number=t_row_nums[0],
+                source_row_index=None,
+                target_row_index=t_row_nums[0],
                 source_row_numbers=[],
                 target_row_numbers=t_row_nums,
+                source_file_id=source_file_id,
+                target_file_id=target_file_id,
+                lineage=lineage,
                 source_record=None,
                 target_record=t_list[0][1],
                 field_differences=[],
@@ -595,14 +1006,29 @@ def verify_datasets(
             duplicate_source_records += s_count
             duplicate_source_keys_count += 1
             conflicting_duplicate_records += 1
+            lineage = {
+                "source_row_indexes": s_row_nums,
+                "target_row_index": t_row_num,
+                "source_file_id": source_file_id,
+                "target_file_id": target_file_id,
+                "key_columns": clean_key_columns,
+                "key_values": k_dict,
+            }
             item = VerificationResultItem(
                 key_values=k_dict,
                 match_status=MatchStatus.AMBIGUOUS_DUPLICATE,
                 discrepancy_category=DiscrepancyCategory.DUPLICATE_KEY,
+                reason_code=ReasonCode.AMBIGUOUS_DUPLICATE,
+                confidence_score=0.0,
                 source_row_number=s_row_nums[0],
                 target_row_number=t_row_num,
+                source_row_index=s_row_nums[0],
+                target_row_index=t_row_num,
                 source_row_numbers=s_row_nums,
                 target_row_numbers=[t_row_num],
+                source_file_id=source_file_id,
+                target_file_id=target_file_id,
+                lineage=lineage,
                 source_record=s_list[0][1],
                 target_record=t_list[0][1],
                 field_differences=[],
@@ -621,14 +1047,29 @@ def verify_datasets(
             duplicate_target_records += t_count
             duplicate_target_keys_count += 1
             conflicting_duplicate_records += 1
+            lineage = {
+                "source_row_index": s_row_num,
+                "target_row_indexes": t_row_nums,
+                "source_file_id": source_file_id,
+                "target_file_id": target_file_id,
+                "key_columns": clean_key_columns,
+                "key_values": k_dict,
+            }
             item = VerificationResultItem(
                 key_values=k_dict,
                 match_status=MatchStatus.AMBIGUOUS_DUPLICATE,
                 discrepancy_category=DiscrepancyCategory.DUPLICATE_KEY,
+                reason_code=ReasonCode.AMBIGUOUS_DUPLICATE,
+                confidence_score=0.0,
                 source_row_number=s_row_num,
                 target_row_number=t_row_nums[0],
+                source_row_index=s_row_num,
+                target_row_index=t_row_nums[0],
                 source_row_numbers=[s_row_num],
                 target_row_numbers=t_row_nums,
+                source_file_id=source_file_id,
+                target_file_id=target_file_id,
+                lineage=lineage,
                 source_record=s_list[0][1],
                 target_record=t_list[0][1],
                 field_differences=[],
@@ -648,14 +1089,29 @@ def verify_datasets(
             duplicate_target_records += t_count
             duplicate_source_keys_count += 1
             duplicate_target_keys_count += 1
+            lineage = {
+                "source_row_indexes": s_row_nums,
+                "target_row_indexes": t_row_nums,
+                "source_file_id": source_file_id,
+                "target_file_id": target_file_id,
+                "key_columns": clean_key_columns,
+                "key_values": k_dict,
+            }
             item = VerificationResultItem(
                 key_values=k_dict,
                 match_status=MatchStatus.DUPLICATE_KEY_BOTH,
                 discrepancy_category=DiscrepancyCategory.DUPLICATE_KEY,
+                reason_code=ReasonCode.DUPLICATE_KEY_BOTH,
+                confidence_score=0.0,
                 source_row_number=s_row_nums[0],
                 target_row_number=t_row_nums[0],
+                source_row_index=s_row_nums[0],
+                target_row_index=t_row_nums[0],
                 source_row_numbers=s_row_nums,
                 target_row_numbers=t_row_nums,
+                source_file_id=source_file_id,
+                target_file_id=target_file_id,
+                lineage=lineage,
                 source_record=s_list[0][1],
                 target_record=t_list[0][1],
                 field_differences=[],
@@ -667,16 +1123,219 @@ def verify_datasets(
             results.append(item)
             discrepancies.append(item)
 
+    # 7. Evaluate unmatched records for candidate similarity & conflicting identifiers
+    paired_src_indices: Set[int] = set()
+    paired_tgt_indices: Set[int] = set()
+
+    if enable_fuzzy_matching and single_unmatched_src and single_unmatched_tgt:
+        all_cols = list(set(src_available_cols) | set(tgt_available_cols))
+        name_cols = [c for c in all_cols if is_name_column(c, fuzzy_match_columns)]
+        id_cols = [c for c in all_cols if is_id_column(c, clean_key_columns)]
+
+        for s_idx, (s_k_tuple, s_row_num, s_rec) in enumerate(single_unmatched_src):
+            best_candidate = None
+            best_score = 0.0
+            best_cand_reason = None
+            best_t_idx = None
+            best_t_k_tuple = None
+            best_t_row_num = None
+            best_t_rec = None
+
+            for t_idx, (t_k_tuple, t_row_num, t_rec) in enumerate(single_unmatched_tgt):
+                if t_idx in paired_tgt_indices:
+                    continue
+
+                for col in name_cols:
+                    s_name = s_rec.get(col)
+                    t_col_name = column_mapping.get(col, col)
+                    t_name = t_rec.get(t_col_name)
+                    if s_name is None or t_name is None:
+                        continue
+                    is_cand, score, cand_reason = evaluate_name_similarity(s_name, t_name)
+                    if is_cand and score >= fuzzy_threshold and score > best_score:
+                        best_score = score
+                        best_cand_reason = cand_reason
+                        best_candidate = col
+                        best_t_idx = t_idx
+                        best_t_k_tuple = t_k_tuple
+                        best_t_row_num = t_row_num
+                        best_t_rec = t_rec
+
+            if best_candidate and best_t_idx is not None and best_t_rec is not None:
+                # Check for conflicting identifiers
+                has_conflicting_id = False
+                conflicting_id_details = []
+                for id_c in id_cols:
+                    s_id_val = s_rec.get(id_c)
+                    t_id_c = column_mapping.get(id_c, id_c)
+                    t_id_val = best_t_rec.get(t_id_c)
+                    if s_id_val is not None and t_id_val is not None:
+                        if str(s_id_val).strip() != str(t_id_val).strip():
+                            has_conflicting_id = True
+                            conflicting_id_details.append(f"{id_c}: '{s_id_val}' vs '{t_id_val}'")
+
+                # Also check key columns themselves
+                s_disp = key_display_dicts[s_k_tuple]
+                t_disp = key_display_dicts[best_t_k_tuple]
+                if s_disp != t_disp:
+                    has_conflicting_id = True
+                    conflicting_id_details.append(f"keys: {s_disp} vs {t_disp}")
+
+                diffs_cand: List[FieldDifference] = []
+                if has_conflicting_id:
+                    diffs_cand.append(
+                        FieldDifference(
+                            field_name="primary_identifier",
+                            source_field=clean_key_columns[0] if clean_key_columns else "id",
+                            target_field=column_mapping.get(clean_key_columns[0], clean_key_columns[0]) if clean_key_columns else "id",
+                            source_value=s_rec.get(clean_key_columns[0]) if clean_key_columns else None,
+                            target_value=best_t_rec.get(column_mapping.get(clean_key_columns[0], clean_key_columns[0])) if clean_key_columns else None,
+                            difference_type="id_conflict",
+                            reason_code=ReasonCode.ID_CONFLICT,
+                            message=f"Conflicting identifier: {'; '.join(conflicting_id_details)}",
+                        )
+                    )
+                t_cand_col = column_mapping.get(best_candidate, best_candidate)
+                diffs_cand.append(
+                    FieldDifference(
+                        field_name=best_candidate,
+                        source_field=best_candidate,
+                        target_field=t_cand_col,
+                        source_value=s_rec.get(best_candidate),
+                        target_value=best_t_rec.get(t_cand_col),
+                        difference_type="fuzzy_name_review",
+                        reason_code=ReasonCode.FUZZY_NAME_REVIEW,
+                        confidence_score=round(best_score / 100.0, 4),
+                        message=f"Name similarity ({best_cand_reason}, score {best_score:.1f}%)",
+                    )
+                )
+
+                lineage = {
+                    "source_row_index": s_row_num,
+                    "target_row_index": best_t_row_num,
+                    "source_file_id": source_file_id,
+                    "target_file_id": target_file_id,
+                    "key_columns": clean_key_columns,
+                    "source_key_values": s_disp,
+                    "target_key_values": t_disp,
+                }
+
+                cand_reason_code = ReasonCode.ID_CONFLICT if has_conflicting_id else ReasonCode.FUZZY_NAME_REVIEW
+                cand_msg = (
+                    f"Fuzzy candidate ({best_cand_reason}, {best_score:.1f}%) with conflicting ID "
+                    f"({'; '.join(conflicting_id_details)}): not auto-matched, enters NEEDS_REVIEW."
+                    if has_conflicting_id
+                    else f"Fuzzy name candidate ({best_cand_reason}, {best_score:.1f}%): enters NEEDS_REVIEW."
+                )
+
+                needs_review_records += 1
+                cand_item = VerificationResultItem(
+                    key_values=s_disp,
+                    match_status=MatchStatus.NEEDS_REVIEW,
+                    discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                    reason_code=cand_reason_code,
+                    confidence_score=round(best_score / 100.0, 4),
+                    source_row_number=s_row_num,
+                    target_row_number=best_t_row_num,
+                    source_row_index=s_row_num,
+                    target_row_index=best_t_row_num,
+                    source_row_numbers=[s_row_num],
+                    target_row_numbers=[best_t_row_num],
+                    source_file_id=source_file_id,
+                    target_file_id=target_file_id,
+                    lineage=lineage,
+                    source_record=s_rec,
+                    target_record=best_t_rec,
+                    field_differences=diffs_cand,
+                    message=cand_msg,
+                )
+                results.append(cand_item)
+                discrepancies.append(cand_item)
+
+                paired_src_indices.add(s_idx)
+                paired_tgt_indices.add(best_t_idx)
+
+    # 8. Emit remaining unpaired unmatched source records
+    for s_idx, (s_k_tuple, s_row_num, s_rec) in enumerate(single_unmatched_src):
+        if s_idx in paired_src_indices:
+            continue
+        unmatched_source_records += 1
+        k_dict = key_display_dicts[s_k_tuple]
+        lineage = {
+            "source_row_index": s_row_num,
+            "source_file_id": source_file_id,
+            "key_columns": clean_key_columns,
+            "key_values": k_dict,
+        }
+        item = VerificationResultItem(
+            key_values=k_dict,
+            match_status=MatchStatus.MISSING_IN_TARGET,
+            discrepancy_category=DiscrepancyCategory.MISSING_RECORD,
+            reason_code=ReasonCode.MISSING_IN_TARGET,
+            confidence_score=0.0,
+            source_row_number=s_row_num,
+            target_row_number=None,
+            source_row_index=s_row_num,
+            target_row_index=None,
+            source_row_numbers=[s_row_num],
+            target_row_numbers=[],
+            source_file_id=source_file_id,
+            target_file_id=target_file_id,
+            lineage=lineage,
+            source_record=s_rec,
+            target_record=None,
+            field_differences=[],
+            message="Record present in source dataset but missing in target dataset.",
+        )
+        results.append(item)
+        discrepancies.append(item)
+
+    # 9. Emit remaining unpaired unmatched target records
+    for t_idx, (t_k_tuple, t_row_num, t_rec) in enumerate(single_unmatched_tgt):
+        if t_idx in paired_tgt_indices:
+            continue
+        unmatched_target_records += 1
+        k_dict = key_display_dicts[t_k_tuple]
+        lineage = {
+            "target_row_index": t_row_num,
+            "target_file_id": target_file_id,
+            "key_columns": clean_key_columns,
+            "key_values": k_dict,
+        }
+        item = VerificationResultItem(
+            key_values=k_dict,
+            match_status=MatchStatus.MISSING_IN_SOURCE,
+            discrepancy_category=DiscrepancyCategory.MISSING_RECORD,
+            reason_code=ReasonCode.MISSING_IN_SOURCE,
+            confidence_score=0.0,
+            source_row_number=None,
+            target_row_number=t_row_num,
+            source_row_index=None,
+            target_row_index=t_row_num,
+            source_row_numbers=[],
+            target_row_numbers=[t_row_num],
+            source_file_id=source_file_id,
+            target_file_id=target_file_id,
+            lineage=lineage,
+            source_record=None,
+            target_record=t_rec,
+            field_differences=[],
+            message="Record present in target dataset but missing in source dataset.",
+        )
+        results.append(item)
+        discrepancies.append(item)
+
     total_discrepancies = len(discrepancies)
     status_str = "completed_with_warnings" if warnings else "completed"
 
     summary = VerificationSummary(
         total_source_records=len(source_records),
         total_target_records=len(target_records),
-        matched_records=identical_matches + field_mismatches,
+        matched_records=identical_matches + field_mismatches + needs_review_records,
         identical_matches=identical_matches,
         field_mismatches=field_mismatches,
         records_with_differences=field_mismatches,
+        needs_review_records=needs_review_records,
         unmatched_source_records=unmatched_source_records,
         unmatched_target_records=unmatched_target_records,
         duplicate_source_records=duplicate_source_records,
@@ -779,6 +1438,10 @@ def verify_project_files(
         tgt_total,
     ) = extract_dataset_records(tgt_path, target_file.file_type, cfg)
 
+    from app.services.profiling_service import get_excluded_row_indices_for_file
+    ex_src = request.excluded_source_rows or get_excluded_row_indices_for_file(src_path)
+    ex_tgt = request.excluded_target_rows or get_excluded_row_indices_for_file(tgt_path)
+
     # 5. Run verification engine
     summary, results, discrepancies, comp_warnings, comp_errors = verify_datasets(
         source_records=src_records,
@@ -792,6 +1455,14 @@ def verify_project_files(
         ignore_case=request.ignore_case,
         null_values=cfg.null_values,
         include_identical=request.include_identical,
+        enable_fuzzy_matching=request.enable_fuzzy_matching,
+        fuzzy_match_columns=request.fuzzy_match_columns,
+        fuzzy_threshold=request.fuzzy_threshold,
+        status_rules=request.status_rules,
+        source_file_id=str(source_file.id),
+        target_file_id=str(target_file.id),
+        excluded_source_rows=ex_src,
+        excluded_target_rows=ex_tgt,
     )
 
     all_warnings = src_issues + tgt_issues + comp_warnings
@@ -881,6 +1552,10 @@ def create_and_execute_verification_run(
         "ignore_whitespace": request.ignore_whitespace,
         "ignore_case": request.ignore_case,
         "include_identical": request.include_identical,
+        "enable_fuzzy_matching": request.enable_fuzzy_matching,
+        "fuzzy_match_columns": request.fuzzy_match_columns,
+        "fuzzy_threshold": request.fuzzy_threshold,
+        "status_rules": request.status_rules,
     }
 
     run = VerificationRun(
@@ -924,6 +1599,10 @@ def create_and_execute_verification_run(
                 tgt_total,
             ) = extract_dataset_records(tgt_path, target_file.file_type, cfg)
 
+            from app.services.profiling_service import get_excluded_row_indices_for_file
+            ex_src = request.excluded_source_rows or get_excluded_row_indices_for_file(src_path)
+            ex_tgt = request.excluded_target_rows or get_excluded_row_indices_for_file(tgt_path)
+
             summary, results, discrepancies, comp_warnings, comp_errors = verify_datasets(
                 source_records=src_records,
                 target_records=tgt_records,
@@ -936,6 +1615,14 @@ def create_and_execute_verification_run(
                 ignore_case=request.ignore_case,
                 null_values=cfg.null_values,
                 include_identical=request.include_identical,
+                enable_fuzzy_matching=request.enable_fuzzy_matching,
+                fuzzy_match_columns=request.fuzzy_match_columns,
+                fuzzy_threshold=request.fuzzy_threshold,
+                status_rules=request.status_rules,
+                source_file_id=str(source_file.id),
+                target_file_id=str(target_file.id),
+                excluded_source_rows=ex_src,
+                excluded_target_rows=ex_tgt,
             )
 
             run.status = "completed"

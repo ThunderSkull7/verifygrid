@@ -22,12 +22,13 @@ const STATUS_META: Record<string, StatusMeta> = {
   uploaded: { label: 'Uploaded', className: 'badge-uploaded' },
   preprocessed: { label: 'Preprocessed', className: 'badge-preprocessed' },
   preprocessing_failed: { label: 'Preprocessing failed', className: 'badge-preprocessing_failed' },
-  // Discrepancy categories
+  // Match statuses and categories
   none: { label: 'Identical', className: 'badge-identical' },
   field_mismatch: { label: 'Field mismatch', className: 'badge-field_mismatch' },
   missing_record: { label: 'Missing record', className: 'badge-missing_record' },
   duplicate_key: { label: 'Duplicate key', className: 'badge-duplicate_key' },
   schema_mismatch: { label: 'Schema mismatch', className: 'badge-schema_mismatch' },
+  needs_review: { label: 'Needs review', className: 'badge-requires_review' },
   // Match statuses
   identical: { label: 'Identical', className: 'badge-identical' },
   missing_in_target: { label: 'Missing in target', className: 'badge-missing_in_target' },

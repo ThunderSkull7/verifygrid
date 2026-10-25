@@ -181,3 +181,42 @@ class VerificationDiscrepancy(Base):
         "VerificationRun",
         back_populates="discrepancies",
     )
+
+    @property
+    def source_row_index(self) -> Optional[int]:
+        return self.source_row_number
+
+    @property
+    def target_row_index(self) -> Optional[int]:
+        return self.target_row_number
+
+    @property
+    def reason_code(self) -> Optional[str]:
+        if self.field_differences:
+            for fd in self.field_differences:
+                rc = fd.get("reason_code")
+                if rc:
+                    return rc
+        status_to_reason = {
+            "identical": "EXACT_MATCH",
+            "field_mismatch": "FIELD_MISMATCH",
+            "missing_in_target": "MISSING_IN_TARGET",
+            "missing_in_source": "MISSING_IN_SOURCE",
+            "duplicate_key_source": "DUPLICATE_KEY_SOURCE",
+            "duplicate_key_target": "DUPLICATE_KEY_TARGET",
+            "duplicate_key_both": "DUPLICATE_KEY_BOTH",
+            "ambiguous_duplicate": "AMBIGUOUS_DUPLICATE",
+            "needs_review": "FUZZY_NAME_REVIEW",
+        }
+        return status_to_reason.get(self.match_status, "FIELD_MISMATCH")
+
+    @property
+    def confidence_score(self) -> Optional[float]:
+        if self.field_differences:
+            for fd in self.field_differences:
+                cs = fd.get("confidence_score")
+                if cs is not None:
+                    return float(cs)
+        if self.match_status == "identical":
+            return 1.0
+        return 0.0
