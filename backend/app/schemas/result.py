@@ -119,6 +119,22 @@ class VerificationResultItem(BaseModel):
     lineage: Optional[Dict[str, Any]] = Field(
         default=None, description="Detailed record provenance and key trace"
     )
+    source_row_indices: Optional[Dict[str, Optional[int]]] = Field(
+        default=None,
+        description="Lineage row indices across all participating sources: {'source_a': 12, 'source_b': 14, 'source_c': 19}",
+    )
+    source_records: Optional[Dict[str, Optional[Dict[str, Any]]]] = Field(
+        default=None,
+        description="Records from each participating source alias",
+    )
+    missing_in_sources: Optional[List[str]] = Field(
+        default=None,
+        description="List of source aliases where this record was missing",
+    )
+    source_presence: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description="Presence boolean per source alias",
+    )
     source_record: Optional[Dict[str, Any]] = Field(
         default=None, description="Data record from source dataset"
     )
@@ -390,7 +406,8 @@ class VerificationRunResponse(BaseModel):
     target_file_id: Optional[uuid.UUID] = None
     status: str
     key_columns: List[str]
-    column_mapping: Optional[Dict[str, str]] = None
+    column_mapping: Optional[Dict[str, Any]] = None
+    sources: Optional[List[Dict[str, Any]]] = None
     configuration: Optional[Dict[str, Any]] = None
     summary: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
@@ -427,6 +444,10 @@ class DiscrepancyItemResponse(BaseModel):
     confidence_score: Optional[float] = None
     source_row_numbers: Optional[List[int]] = None
     target_row_numbers: Optional[List[int]] = None
+    source_row_indices: Optional[Dict[str, Optional[int]]] = None
+    source_records: Optional[Dict[str, Optional[Dict[str, Any]]]] = None
+    missing_in_sources: Optional[List[str]] = None
+    source_presence: Optional[Dict[str, bool]] = None
     source_record: Optional[Dict[str, Any]] = None
     target_record: Optional[Dict[str, Any]] = None
     field_differences: Optional[List[Dict[str, Any]]] = None
@@ -443,4 +464,16 @@ class DiscrepancyListResponse(BaseModel):
     items: List[DiscrepancyItemResponse]
     skip: int
     limit: int
+
+
+# Re-export multisource schemas
+from app.schemas.multisource import (
+    MultiSourceKeyRecommendRequest,
+    MultiSourceKeyRecommendResponse,
+    MultiSourceKeyRecommendation,
+    MultiSourceVerificationRequest,
+    MultiSourceVerificationResponse,
+    SourceDefinition,
+)
+
 

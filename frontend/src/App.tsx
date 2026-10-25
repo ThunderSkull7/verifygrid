@@ -4,12 +4,10 @@ import { AuthScreen } from './components/AuthScreen';
 import { Sidebar } from './components/Sidebar';
 import type { AppTab } from './components/Sidebar';
 import { ProjectsView } from './components/ProjectsView';
-import { FileUploadSection } from './components/FileUploadSection';
-import { ReconciliationConfig } from './components/ReconciliationConfig';
-import { VerificationResultsView } from './components/VerificationResultsView';
+import { ReconciliationWizard } from './components/ReconciliationWizard';
 import { AuditHistoryView } from './components/AuditHistoryView';
 import { AppearanceControl } from './components/AppearanceControl';
-import type { Project, PreprocessingResult, VerificationResponse, VerificationRun } from './types';
+import type { Project, PreprocessingResult } from './types';
 import { api } from './services/api';
 import { AlertCircle, Menu, ShieldCheck } from 'lucide-react';
 
@@ -36,8 +34,6 @@ export const App: React.FC = () => {
   const [uploadedDatasets, setUploadedDatasets] = useState<
     { id: string; name: string; profile?: PreprocessingResult }[]
   >([]);
-  const [verificationResult, setVerificationResult] = useState<VerificationResponse | null>(null);
-  const [currentRun, setCurrentRun] = useState<VerificationRun | undefined>(undefined);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -106,7 +102,6 @@ export const App: React.FC = () => {
     setActiveTab('verify');
     setMobileNavOpen(false);
     setUploadedDatasets([]);
-    setVerificationResult(null);
   };
 
   const handleSelectProject = (project: Project) => {
@@ -114,7 +109,6 @@ export const App: React.FC = () => {
     setActiveTab('verify');
     setMobileNavOpen(false);
     setUploadedDatasets([]);
-    setVerificationResult(null);
   };
 
   const handleSelectTab = (tab: AppTab) => {
@@ -236,54 +230,29 @@ export const App: React.FC = () => {
                 </div>
               ) : (
                 <div>
-                  <div className="page-header">
+                  <div className="page-header" style={{ marginBottom: 16 }}>
                     <div>
                       <h1 className="page-title">Dataset reconciliation</h1>
                       <p className="page-subtitle">
-                        Upload baseline and target CSV/XLSX files, configure matching keys, and
-                        reconcile records against{' '}
+                        Multi-source ingestion, candidate key discovery, and unified 5-step guided reconciliation against{' '}
                         <strong>{activeProject.name}</strong>.
                       </p>
                     </div>
                   </div>
 
-                  <FileUploadSection
+                  <ReconciliationWizard
                     project={activeProject}
-                    datasets={uploadedDatasets}
+                    uploadedDatasets={uploadedDatasets}
                     onFileUploaded={(file, profile) => {
                       setUploadedDatasets((prev) => [
                         ...prev,
                         { id: file.id, name: file.original_filename, profile },
                       ]);
                     }}
+                    onRunCompleted={(_run) => {
+                      // Run completed successfully
+                    }}
                   />
-
-                  {uploadedDatasets.length >= 2 ? (
-                    <ReconciliationConfig
-                      project={activeProject}
-                      datasets={uploadedDatasets}
-                      onVerificationComplete={(resp, run) => {
-                        setVerificationResult(resp);
-                        setCurrentRun(run);
-                      }}
-                    />
-                  ) : (
-                    <div className="info-strip">
-                      <AlertCircle size={15} />
-                      <span>
-                        <strong>Next step:</strong> upload at least two files (source and target) to
-                        configure matching keys and trigger verification.
-                      </span>
-                    </div>
-                  )}
-
-                  {verificationResult && (
-                    <VerificationResultsView
-                      projectId={activeProject.id}
-                      response={verificationResult}
-                      run={currentRun}
-                    />
-                  )}
                 </div>
               )}
             </div>

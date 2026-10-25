@@ -34,6 +34,11 @@ from app.schemas.result import (
     VerificationResultItem,
     VerificationSummary,
 )
+from app.schemas.multisource import (
+    MultiSourceVerificationRequest,
+    MultiSourceVerificationResponse,
+    SourceDefinition,
+)
 from app.services.preprocessing import extract_dataset_records
 from app.services.project_service import get_project_by_id
 from app.utils.normalization import (
@@ -1781,5 +1786,591 @@ def get_verification_run_summary(
     """Retrieve only the summary metrics for an authorized verification run."""
     run = get_verification_run(db, project_id, run_id, current_user=current_user)
     return run.summary or {}
+
+
+def verify_multisource_datasets(
+    sources: List[SourceDefinition],
+    sources_records: Dict[str, List[Tuple[int, Dict[str, Any]]]],
+    unified_keys: List[str],
+    compare_attributes: Optional[List[str]] = None,
+    ignore_attributes: Optional[List[str]] = None,
+    numeric_tolerance: float = 0.0,
+    ignore_whitespace: bool = True,
+    ignore_case: bool = False,
+    null_values: Optional[List[str]] = None,
+    include_identical: bool = True,
+    status_rules: Optional[Dict[str, Any]] = None,
+) -> Tuple[
+    VerificationSummary,
+    List[VerificationResultItem],
+    List[VerificationResultItem],
+    Dict[str, int],
+    Dict[str, int],
+]:
+    """
+    Multi-source reconciliation engine supporting 2, 3, or more datasets.
+    Aligns records across sources using primary and composite keys, tracks complete
+    source-row index lineage, and categorizes multi-source matches and discrepancies.
+    """
+    null_set = (
+        {v.strip().lower() for v in null_values if v is not None}
+        if null_values
+        else {"none", "null", "nil", "nan", "n/a", "na", "#n/a", ""}
+    )
+
+    primary_source = next((s for s in sources if s.is_primary), sources[0])
+    primary_alias = primary_source.alias
+
+    # Apply quarantine exclusions per source
+    filtered_records: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+    for s in sources:
+        ex_rows = set(s.excluded_row_indices or [])
+        filtered_records[s.alias] = [
+            (r_num, rec) for r_num, rec in sources_records[s.alias] if r_num not in ex_rows
+        ]
+
+    # Index records by normalized key tuple per source
+    source_key_groups: Dict[str, Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    key_display_dicts: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+
+    for s in sources:
+        alias = s.alias
+        key_cols = s.key_columns
+        for r_num, rec in filtered_records[alias]:
+            k_tuple_vals = []
+            k_disp = {}
+            for idx, uk in enumerate(unified_keys):
+                col_name = None
+                if uk in s.field_mapping:
+                    col_name = s.field_mapping[uk]
+                elif s.field_mapping:
+                    for src_c, uni_a in s.field_mapping.items():
+                        if uni_a == uk:
+                            col_name = src_c
+                            break
+                if not col_name:
+                    if idx < len(key_cols):
+                        col_name = key_cols[idx]
+                    elif uk in rec:
+                        col_name = uk
+                    else:
+                        col_name = key_cols[0]
+
+                val = rec.get(col_name)
+                k_disp[uk] = val
+                k_norm = normalize_key_value(val, null_set, ignore_whitespace, ignore_case)
+                k_tuple_vals.append(k_norm)
+
+            k_tuple = tuple(k_tuple_vals)
+            source_key_groups[alias][k_tuple].append((r_num, rec))
+            if k_tuple not in key_display_dicts:
+                key_display_dicts[k_tuple] = k_disp
+
+    all_keys = list(set().union(*(source_key_groups[s.alias].keys() for s in sources)))
+    all_keys.sort(key=lambda x: str(x))
+
+    # Resolve attributes to compare
+    if compare_attributes is None:
+        ignore_set = set(ignore_attributes or []) | set(unified_keys)
+        all_attrs = set()
+        for s in sources:
+            for src_c, uni_a in s.field_mapping.items():
+                if uni_a not in ignore_set:
+                    all_attrs.add(uni_a)
+        if not all_attrs and filtered_records[primary_alias]:
+            prim_cols = set(filtered_records[primary_alias][0][1].keys())
+            for s in sources[1:]:
+                if filtered_records[s.alias]:
+                    prim_cols &= set(filtered_records[s.alias][0][1].keys())
+            all_attrs = prim_cols - ignore_set
+        compare_attrs = sorted(list(all_attrs))
+    else:
+        compare_attrs = [
+            a
+            for a in compare_attributes
+            if a not in (ignore_attributes or []) and a not in unified_keys
+        ]
+
+    results: List[VerificationResultItem] = []
+    discrepancies: List[VerificationResultItem] = []
+
+    identical_matches = 0
+    field_mismatches = 0
+    needs_review_records = 0
+    unmatched_source_records = 0
+    unmatched_target_records = 0
+    duplicate_source_records = 0
+    duplicate_target_records = 0
+    duplicate_source_keys_count = 0
+    duplicate_target_keys_count = 0
+    matched_records = 0
+
+    for k_tuple in all_keys:
+        presence = {s.alias: (len(source_key_groups[s.alias].get(k_tuple, [])) > 0) for s in sources}
+        dupe_counts = {s.alias: len(source_key_groups[s.alias].get(k_tuple, [])) for s in sources}
+        row_indices = {
+            s.alias: (source_key_groups[s.alias][k_tuple][0][0] if presence[s.alias] else None)
+            for s in sources
+        }
+        source_recs_map = {
+            s.alias: (source_key_groups[s.alias][k_tuple][0][1] if presence[s.alias] else None)
+            for s in sources
+        }
+        k_dict = key_display_dicts[k_tuple]
+
+        has_dupes = any(c > 1 for c in dupe_counts.values())
+
+        if has_dupes:
+            if dupe_counts.get(primary_alias, 0) > 1:
+                duplicate_source_keys_count += 1
+                duplicate_source_records += dupe_counts[primary_alias]
+            sec_dupes = sum(c for alias, c in dupe_counts.items() if alias != primary_alias and c > 1)
+            if sec_dupes > 0:
+                duplicate_target_keys_count += 1
+                duplicate_target_records += sec_dupes
+
+            item = VerificationResultItem(
+                key_values=k_dict,
+                match_status=MatchStatus.DUPLICATE_KEY_SOURCE,
+                discrepancy_category=DiscrepancyCategory.DUPLICATE_KEY,
+                reason_code=ReasonCode.DUPLICATE_KEY_SOURCE,
+                source_row_indices=row_indices,
+                source_records=source_recs_map,
+                missing_in_sources=[s.alias for s in sources if not presence[s.alias]],
+                source_presence=presence,
+                source_row_number=row_indices.get(primary_alias),
+                target_row_number=next(
+                    (idx for a, idx in row_indices.items() if a != primary_alias and idx is not None),
+                    None,
+                ),
+                source_record=source_recs_map.get(primary_alias),
+                target_record=next(
+                    (rec for a, rec in source_recs_map.items() if a != primary_alias and rec is not None),
+                    None,
+                ),
+                message=f"Duplicate key across rows in source(s): {[s for s, c in dupe_counts.items() if c > 1]}",
+            )
+            results.append(item)
+            discrepancies.append(item)
+            continue
+
+        if all(presence.values()):
+            matched_records += 1
+            diffs: List[FieldDifference] = []
+            has_status_mismatch = False
+            prim_rec = source_recs_map[primary_alias]
+
+            for attr in compare_attrs:
+                prim_col = primary_source.field_mapping.get(attr, attr)
+                val_prim = prim_rec.get(prim_col)
+
+                for sec_s in sources:
+                    if sec_s.alias == primary_alias:
+                        continue
+                    sec_rec = source_recs_map[sec_s.alias]
+                    sec_col = sec_s.field_mapping.get(attr, attr)
+                    val_sec = sec_rec.get(sec_col)
+
+                    if is_status_column(attr, status_rules):
+                        is_perm, stat_msg = evaluate_status_rule(val_prim, val_sec, status_rules)
+                        if not is_perm:
+                            has_status_mismatch = True
+                            diffs.append(
+                                FieldDifference(
+                                    field_name=attr,
+                                    source_field=f"{primary_alias}.{prim_col}",
+                                    target_field=f"{sec_s.alias}.{sec_col}",
+                                    source_value=val_prim,
+                                    target_value=val_sec,
+                                    difference_type="status_mismatch",
+                                    reason_code=ReasonCode.STATUS_MISMATCH,
+                                    message=stat_msg or f"Status mismatch in '{attr}': '{val_prim}' vs '{val_sec}'",
+                                )
+                            )
+                            continue
+                        elif str(val_prim).strip().lower() != str(val_sec).strip().lower():
+                            continue
+
+                    is_match, diff_type, s_t, t_t = compare_field_values(
+                        src_val=val_prim,
+                        tgt_val=val_sec,
+                        null_set=null_set,
+                        numeric_tolerance=numeric_tolerance,
+                        ignore_whitespace=ignore_whitespace,
+                        ignore_case=ignore_case,
+                    )
+                    if not is_match:
+                        diffs.append(
+                            FieldDifference(
+                                field_name=attr,
+                                source_field=f"{primary_alias}.{prim_col}",
+                                target_field=f"{sec_s.alias}.{sec_col}",
+                                source_value=val_prim,
+                                target_value=val_sec,
+                                source_type=s_t,
+                                target_type=t_t,
+                                difference_type=diff_type,
+                                reason_code=ReasonCode.FIELD_MISMATCH,
+                                message=f"Value in '{sec_s.alias}' differs from primary '{primary_alias}'",
+                            )
+                        )
+
+            if not diffs:
+                identical_matches += 1
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.IDENTICAL,
+                    discrepancy_category=DiscrepancyCategory.NONE,
+                    reason_code=ReasonCode.EXACT_MATCH,
+                    confidence_score=1.0,
+                    source_row_indices=row_indices,
+                    source_records=source_recs_map,
+                    missing_in_sources=[],
+                    source_presence=presence,
+                    source_row_number=row_indices.get(primary_alias),
+                    target_row_number=next(
+                        (idx for a, idx in row_indices.items() if a != primary_alias and idx is not None),
+                        None,
+                    ),
+                    source_record=source_recs_map.get(primary_alias),
+                    target_record=next(
+                        (rec for a, rec in source_recs_map.items() if a != primary_alias and rec is not None),
+                        None,
+                    ),
+                    field_differences=[],
+                    message="Records match identically across all sources.",
+                )
+                if include_identical:
+                    results.append(item)
+            elif has_status_mismatch:
+                field_mismatches += 1
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.FIELD_MISMATCH,
+                    discrepancy_category=DiscrepancyCategory.FIELD_MISMATCH,
+                    reason_code=ReasonCode.STATUS_MISMATCH,
+                    confidence_score=0.0,
+                    source_row_indices=row_indices,
+                    source_records=source_recs_map,
+                    missing_in_sources=[],
+                    source_presence=presence,
+                    source_row_number=row_indices.get(primary_alias),
+                    target_row_number=next(
+                        (idx for a, idx in row_indices.items() if a != primary_alias and idx is not None),
+                        None,
+                    ),
+                    source_record=source_recs_map.get(primary_alias),
+                    target_record=next(
+                        (rec for a, rec in source_recs_map.items() if a != primary_alias and rec is not None),
+                        None,
+                    ),
+                    field_differences=diffs,
+                    message="Status mismatch detected across sources.",
+                )
+                results.append(item)
+                discrepancies.append(item)
+            else:
+                field_mismatches += 1
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.FIELD_MISMATCH,
+                    discrepancy_category=DiscrepancyCategory.FIELD_MISMATCH,
+                    reason_code=ReasonCode.FIELD_MISMATCH,
+                    confidence_score=0.0,
+                    source_row_indices=row_indices,
+                    source_records=source_recs_map,
+                    missing_in_sources=[],
+                    source_presence=presence,
+                    source_row_number=row_indices.get(primary_alias),
+                    target_row_number=next(
+                        (idx for a, idx in row_indices.items() if a != primary_alias and idx is not None),
+                        None,
+                    ),
+                    source_record=source_recs_map.get(primary_alias),
+                    target_record=next(
+                        (rec for a, rec in source_recs_map.items() if a != primary_alias and rec is not None),
+                        None,
+                    ),
+                    field_differences=diffs,
+                    message=f"{len(diffs)} field difference(s) detected across sources.",
+                )
+                results.append(item)
+                discrepancies.append(item)
+        else:
+            missing_aliases = [s.alias for s in sources if not presence[s.alias]]
+            if presence[primary_alias]:
+                unmatched_target_records += 1
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.MISSING_IN_TARGET,
+                    discrepancy_category=DiscrepancyCategory.MISSING_RECORD,
+                    reason_code=ReasonCode.MISSING_IN_TARGET,
+                    source_row_indices=row_indices,
+                    source_records=source_recs_map,
+                    missing_in_sources=missing_aliases,
+                    source_presence=presence,
+                    source_row_number=row_indices.get(primary_alias),
+                    target_row_number=None,
+                    source_record=source_recs_map.get(primary_alias),
+                    target_record=None,
+                    message=f"Record present in primary '{primary_alias}' but missing in: {', '.join(missing_aliases)}",
+                )
+            else:
+                unmatched_source_records += 1
+                present_aliases = [s.alias for s in sources if presence[s.alias]]
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.MISSING_IN_SOURCE,
+                    discrepancy_category=DiscrepancyCategory.MISSING_RECORD,
+                    reason_code=ReasonCode.MISSING_IN_SOURCE,
+                    source_row_indices=row_indices,
+                    source_records=source_recs_map,
+                    missing_in_sources=[primary_alias],
+                    source_presence=presence,
+                    source_row_number=None,
+                    target_row_number=next(
+                        (idx for a, idx in row_indices.items() if a in present_aliases and idx is not None),
+                        None,
+                    ),
+                    source_record=None,
+                    target_record=next(
+                        (rec for a, rec in source_recs_map.items() if a in present_aliases and rec is not None),
+                        None,
+                    ),
+                    message=f"Record missing in primary '{primary_alias}'; present in: {', '.join(present_aliases)}",
+                )
+            results.append(item)
+            discrepancies.append(item)
+
+    records_by_source = {s.alias: len(filtered_records[s.alias]) for s in sources}
+    missing_by_source = {
+        s.alias: sum(1 for item in results if s.alias in (item.missing_in_sources or []))
+        for s in sources
+    }
+
+    summary = VerificationSummary(
+        total_source_records=len(filtered_records[primary_alias]),
+        total_target_records=sum(
+            len(filtered_records[s.alias]) for s in sources if s.alias != primary_alias
+        ),
+        matched_records=matched_records,
+        identical_matches=identical_matches,
+        field_mismatches=field_mismatches,
+        records_with_differences=field_mismatches,
+        needs_review_records=needs_review_records,
+        unmatched_source_records=unmatched_source_records,
+        unmatched_target_records=unmatched_target_records,
+        duplicate_source_records=duplicate_source_records,
+        duplicate_target_records=duplicate_target_records,
+        duplicate_source_keys_count=duplicate_source_keys_count,
+        duplicate_target_keys_count=duplicate_target_keys_count,
+        conflicting_duplicate_records=0,
+        total_discrepancies=len(discrepancies),
+        status="completed",
+    )
+
+    return summary, results, discrepancies, records_by_source, missing_by_source
+
+
+def verify_multisource_project_files(
+    db: Session,
+    project_id: uuid.UUID,
+    request: MultiSourceVerificationRequest,
+    current_user: Optional[User] = None,
+) -> MultiSourceVerificationResponse:
+    """Reconcile multiple uploaded files in a project on-demand."""
+    project = get_project_by_id(db, project_id, current_user=current_user)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
+    cfg = request.preprocessing_config or PreprocessingConfig()
+    sources_records: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+    from app.services.profiling_service import get_excluded_row_indices_for_file
+
+    storage_root_resolved = settings.storage_root.resolve()
+
+    for s in request.sources:
+        sf = db.query(SourceFile).filter(
+            SourceFile.id == s.file_id,
+            SourceFile.project_id == project_id,
+        ).first()
+        if sf is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Source file {s.file_id} ({s.alias}) not found for this project.",
+            )
+
+        path_resolved = Path(sf.storage_path).resolve()
+        if not str(path_resolved).startswith(str(storage_root_resolved)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access to file path for {s.alias} is restricted.",
+            )
+        if not path_resolved.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Content for {s.alias} not found on disk.",
+            )
+
+        if not s.excluded_row_indices:
+            s.excluded_row_indices = get_excluded_row_indices_for_file(path_resolved)
+
+        recs, _, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, cfg)
+        sources_records[s.alias] = recs
+
+    summary, results, discrepancies, records_by_src, missing_by_src = verify_multisource_datasets(
+        sources=request.sources,
+        sources_records=sources_records,
+        unified_keys=request.unified_keys,
+        compare_attributes=request.compare_attributes,
+        ignore_attributes=request.ignore_attributes,
+        numeric_tolerance=request.numeric_tolerance,
+        ignore_whitespace=request.ignore_whitespace,
+        ignore_case=request.ignore_case,
+        null_values=cfg.null_values,
+        include_identical=request.include_identical,
+        status_rules=request.status_rules,
+    )
+
+    return MultiSourceVerificationResponse(
+        project_id=project_id,
+        sources=request.sources,
+        unified_keys=request.unified_keys,
+        summary=summary,
+        records_by_source=records_by_src,
+        missing_by_source=missing_by_src,
+        results=results,
+        discrepancies=discrepancies,
+        warnings=[],
+        errors=[],
+    )
+
+
+def create_and_execute_multisource_run(
+    db: Session,
+    project_id: uuid.UUID,
+    request: MultiSourceVerificationRequest,
+    current_user: Optional[User] = None,
+) -> VerificationRun:
+    """Create a persistent multi-source VerificationRun record and persist discrepancies."""
+    project = get_project_by_id(db, project_id, current_user=current_user)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
+    primary_source = next((s for s in request.sources if s.is_primary), request.sources[0])
+    secondary_source = next((s for s in request.sources if s.alias != primary_source.alias), request.sources[-1])
+
+    now_utc = datetime.now(timezone.utc)
+    run = VerificationRun(
+        project_id=project_id,
+        source_file_id=primary_source.file_id,
+        target_file_id=secondary_source.file_id,
+        key_columns=request.unified_keys,
+        column_mapping={s.alias: s.field_mapping for s in request.sources},
+        sources=[s.model_dump(mode="json") for s in request.sources],
+        configuration=request.model_dump(mode="json"),
+        status="running",
+        started_at=now_utc,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    try:
+        with db.begin_nested():
+            cfg = request.preprocessing_config or PreprocessingConfig()
+            sources_records: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+            from app.services.profiling_service import get_excluded_row_indices_for_file
+            storage_root_resolved = settings.storage_root.resolve()
+
+            for s in request.sources:
+                sf = db.query(SourceFile).filter(
+                    SourceFile.id == s.file_id,
+                    SourceFile.project_id == project_id,
+                ).first()
+                if sf is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Source file {s.file_id} ({s.alias}) not found.",
+                    )
+                path_resolved = Path(sf.storage_path).resolve()
+                if not str(path_resolved).startswith(str(storage_root_resolved)):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Access to file path for {s.alias} is restricted.",
+                    )
+                if not path_resolved.exists():
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Content for {s.alias} not found on disk.",
+                    )
+
+                if not s.excluded_row_indices:
+                    s.excluded_row_indices = get_excluded_row_indices_for_file(path_resolved)
+
+                recs, _, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, cfg)
+                sources_records[s.alias] = recs
+
+            summary, results, discrepancies, records_by_src, missing_by_src = verify_multisource_datasets(
+                sources=request.sources,
+                sources_records=sources_records,
+                unified_keys=request.unified_keys,
+                compare_attributes=request.compare_attributes,
+                ignore_attributes=request.ignore_attributes,
+                numeric_tolerance=request.numeric_tolerance,
+                ignore_whitespace=request.ignore_whitespace,
+                ignore_case=request.ignore_case,
+                null_values=cfg.null_values,
+                include_identical=request.include_identical,
+                status_rules=request.status_rules,
+            )
+
+            run.status = "completed"
+            summary_dict = summary.model_dump()
+            summary_dict["records_by_source"] = records_by_src
+            summary_dict["missing_by_source"] = missing_by_src
+            run.summary = summary_dict
+            run.completed_at = datetime.now(timezone.utc)
+
+            for item in discrepancies:
+                disc = VerificationDiscrepancy(
+                    run_id=run.id,
+                    match_status=item.match_status.value,
+                    discrepancy_category=item.discrepancy_category.value,
+                    key_values=item.key_values,
+                    source_row_number=item.source_row_number,
+                    target_row_number=item.target_row_number,
+                    source_row_indices=item.source_row_indices,
+                    source_records=item.source_records,
+                    source_record=item.source_record,
+                    target_record=item.target_record,
+                    field_differences=[d.model_dump() for d in item.field_differences] if item.field_differences else None,
+                    message=item.message,
+                )
+                db.add(disc)
+
+        db.commit()
+        db.refresh(run)
+        return run
+
+    except Exception as exc:
+        try:
+            run.status = "failed"
+            error_detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            run.error_message = error_detail
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            pass
+        raise
+
 
 

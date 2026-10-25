@@ -13,16 +13,20 @@ from app.models.user import User
 from app.schemas.result import (
     DiscrepancyItemResponse,
     DiscrepancyListResponse,
+    MultiSourceVerificationRequest,
+    MultiSourceVerificationResponse,
     VerificationRequest,
     VerificationResponse,
     VerificationRunListResponse,
     VerificationRunResponse,
 )
 from app.services.verification_engine import (
+    create_and_execute_multisource_run,
     create_and_execute_verification_run,
     get_verification_run,
     list_run_discrepancies,
     list_verification_runs,
+    verify_multisource_project_files,
     verify_project_files,
 )
 
@@ -70,6 +74,51 @@ def create_verification_run_endpoint(
 ) -> VerificationRunResponse:
     """Create and execute a persistent verification run."""
     run = create_and_execute_verification_run(
+        db=db,
+        project_id=project_id,
+        request=request,
+        current_user=current_user,
+    )
+    return VerificationRunResponse.model_validate(run)
+
+
+@router.post(
+    "/projects/{project_id}/verify/multi-source",
+    response_model=MultiSourceVerificationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reconcile 2, 3, or more datasets in a project (in-memory)",
+    description="Multi-source reconciliation aligning arbitrary datasets with source-row index lineage.",
+)
+def verify_multisource_files_endpoint(
+    project_id: uuid.UUID,
+    request: MultiSourceVerificationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MultiSourceVerificationResponse:
+    """Trigger on-demand multi-source reconciliation."""
+    return verify_multisource_project_files(
+        db=db,
+        project_id=project_id,
+        request=request,
+        current_user=current_user,
+    )
+
+
+@router.post(
+    "/projects/{project_id}/runs/multi-source",
+    response_model=VerificationRunResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create and execute a persistent multi-source verification run",
+    description="Creates a persistent multi-source verification run across 2, 3, or more sources.",
+)
+def create_multisource_run_endpoint(
+    project_id: uuid.UUID,
+    request: MultiSourceVerificationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> VerificationRunResponse:
+    """Create and execute a persistent multi-source verification run."""
+    run = create_and_execute_multisource_run(
         db=db,
         project_id=project_id,
         request=request,

@@ -6,6 +6,10 @@
 import type {
   DiscrepancyListResponse,
   FileProfileSummary,
+  MultiSourceKeyRecommendRequest,
+  MultiSourceKeyRecommendResponse,
+  MultiSourceVerificationRequest,
+  MultiSourceVerificationResponse,
   PreprocessingConfig,
   PreprocessingResult,
   Project,
@@ -226,6 +230,46 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  }
+
+  // --- Multi-Source Endpoints ---
+  async recommendCandidateKeys(
+    projectId: string,
+    payload: MultiSourceKeyRecommendRequest
+  ): Promise<MultiSourceKeyRecommendResponse> {
+    return this.request<MultiSourceKeyRecommendResponse>(
+      `/projects/${projectId}/keys/recommend`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async verifyMultiSourceFiles(
+    projectId: string,
+    payload: MultiSourceVerificationRequest
+  ): Promise<MultiSourceVerificationResponse> {
+    return this.request<MultiSourceVerificationResponse>(
+      `/projects/${projectId}/verify/multi-source`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async createMultiSourceVerificationRun(
+    projectId: string,
+    payload: MultiSourceVerificationRequest
+  ): Promise<VerificationRun> {
+    return this.request<VerificationRun>(
+      `/projects/${projectId}/runs/multi-source`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
   }
 
   async listVerificationRuns(

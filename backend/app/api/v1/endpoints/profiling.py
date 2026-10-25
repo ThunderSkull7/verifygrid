@@ -9,6 +9,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
+from app.schemas.multisource import (
+    MultiSourceKeyRecommendRequest,
+    MultiSourceKeyRecommendResponse,
+)
 from app.schemas.profiling import (
     FileProfileSummary,
     QuarantineListResponse,
@@ -18,6 +22,7 @@ from app.schemas.profiling import (
 from app.services.profiling_service import (
     get_file_profile,
     get_file_quarantine,
+    recommend_keys_for_project_files,
     resolve_quarantine_records,
 )
 
@@ -105,3 +110,27 @@ def resolve_quarantine_endpoint(
         request=request,
         current_user=current_user,
     )
+
+
+@router.post(
+    "/projects/{project_id}/keys/recommend",
+    response_model=MultiSourceKeyRecommendResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Recommend candidate join keys across uploaded files",
+    description="Analyzes multiple files, measures uniqueness, null rates, and value overlaps to recommend join keys.",
+)
+def recommend_keys_endpoint(
+    project_id: uuid.UUID,
+    request: MultiSourceKeyRecommendRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MultiSourceKeyRecommendResponse:
+    """Discover and rank candidate join keys across multiple uploaded datasets."""
+    return recommend_keys_for_project_files(
+        db=db,
+        project_id=project_id,
+        file_ids=request.file_ids,
+        aliases=request.aliases,
+        current_user=current_user,
+    )
+

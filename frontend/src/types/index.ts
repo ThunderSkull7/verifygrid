@@ -132,6 +132,10 @@ export interface VerificationResultItem {
   source_file_id?: string | null;
   target_file_id?: string | null;
   lineage?: Record<string, any> | null;
+  source_row_indices?: Record<string, number | null> | null;
+  source_records?: Record<string, Record<string, any> | null> | null;
+  missing_in_sources?: string[] | null;
+  source_presence?: Record<string, boolean> | null;
   source_record?: Record<string, any> | null;
   target_record?: Record<string, any> | null;
   field_differences?: FieldDifference[];
@@ -198,6 +202,7 @@ export interface VerificationRun {
   status: string;
   key_columns: string[];
   column_mapping?: Record<string, string> | null;
+  sources?: SourceDefinition[] | null;
   configuration?: Record<string, any> | null;
   summary?: VerificationSummary | null;
   error_message?: string | null;
@@ -224,6 +229,10 @@ export interface DiscrepancyItemResponse {
   target_row_number?: number | null;
   source_row_numbers?: number[] | null;
   target_row_numbers?: number[] | null;
+  source_row_indices?: Record<string, number | null> | null;
+  source_records?: Record<string, Record<string, any> | null> | null;
+  missing_in_sources?: string[] | null;
+  source_presence?: Record<string, boolean> | null;
   source_record?: Record<string, any> | null;
   target_record?: Record<string, any> | null;
   field_differences?: FieldDifference[] | null;
@@ -340,4 +349,64 @@ export interface QuarantineResolutionResponse {
   impact_preview: PreFlightImpactPreview;
   quarantined_records: QuarantinedRecord[];
 }
+
+// --- Batch 3: Multi-Source Ingestion & Wizard Types ---
+
+export interface SourceDefinition {
+  alias: string;
+  file_id: string;
+  is_primary?: boolean;
+  key_columns: string[];
+  field_mapping?: Record<string, string>;
+  excluded_row_indices?: number[];
+}
+
+export interface MultiSourceVerificationRequest {
+  sources: SourceDefinition[];
+  unified_keys: string[];
+  compare_attributes?: string[] | null;
+  ignore_attributes?: string[];
+  numeric_tolerance?: number;
+  ignore_whitespace?: boolean;
+  ignore_case?: boolean;
+  include_identical?: boolean;
+  status_rules?: Record<string, any>;
+  preprocessing_config?: PreprocessingConfig | null;
+}
+
+export interface MultiSourceKeyRecommendation {
+  key_name: string;
+  is_composite: boolean;
+  overall_score: number;
+  overlap_score: number;
+  source_columns: Record<string, string[]>;
+  uniqueness_by_source: Record<string, number>;
+  null_rate_by_source: Record<string, number>;
+  recommendation_reason: string;
+}
+
+export interface MultiSourceKeyRecommendRequest {
+  file_ids: string[];
+  aliases?: string[];
+}
+
+export interface MultiSourceKeyRecommendResponse {
+  recommendations: MultiSourceKeyRecommendation[];
+  total_evaluated_columns: number;
+}
+
+export interface MultiSourceVerificationResponse {
+  project_id: string;
+  run_id?: string | null;
+  sources: SourceDefinition[];
+  unified_keys: string[];
+  summary: VerificationSummary;
+  records_by_source: Record<string, number>;
+  missing_by_source: Record<string, number>;
+  results: VerificationResultItem[];
+  discrepancies: VerificationResultItem[];
+  warnings: any[];
+  errors: string[];
+}
+
 

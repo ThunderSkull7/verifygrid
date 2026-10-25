@@ -57,6 +57,10 @@ class VerificationRun(Base):
         JSON,
         nullable=True,
     )
+    sources: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
     configuration: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSON,
         nullable=True,
@@ -151,6 +155,14 @@ class VerificationDiscrepancy(Base):
         nullable=True,
     )
     target_row_numbers: Mapped[Optional[List[int]]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    source_row_indices: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    source_records: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSON,
         nullable=True,
     )
