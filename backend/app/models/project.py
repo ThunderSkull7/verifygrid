@@ -1,9 +1,16 @@
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.source_file import SourceFile
+    from app.models.user import User
+    from app.models.verification_run import VerificationRun
 
 
 class Project(Base):
