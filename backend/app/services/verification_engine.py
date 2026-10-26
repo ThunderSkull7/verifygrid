@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
 
 from fastapi import HTTPException, status
+from sqlalchemy import cast, func, or_, String
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -26,9 +27,11 @@ from rapidfuzz import fuzz
 
 from app.schemas.result import (
     DiscrepancyCategory,
+    FieldComparisonDiff,
     FieldDifference,
     MatchStatus,
     ReasonCode,
+    SideBySideInspectionResponse,
     VerificationRequest,
     VerificationResponse,
     VerificationResultItem,
@@ -1352,6 +1355,11 @@ def verify_datasets(
         status=status_str,
     )
 
+    from app.services.materiality_engine import compute_record_materiality, compute_summary_materiality
+    for r in results:
+        compute_record_materiality(r, column_mapping=column_mapping)
+    summary = compute_summary_materiality(results, discrepancies, summary)
+
     return summary, results, discrepancies, warnings, errors
 
 
@@ -1647,6 +1655,19 @@ def create_and_execute_verification_run(
                     target_row_numbers=item.target_row_numbers,
                     source_record=item.source_record,
                     target_record=item.target_record,
+                    child_records=item.child_records,
+                    aggregated_amount=item.aggregated_amount,
+                    expected_amount=item.expected_amount,
+                    source_amount=item.source_amount,
+                    target_amount=item.target_amount,
+                    variance_amount=item.variance_amount,
+                    exposure_amount=item.exposure_amount,
+                    currency=item.currency or "USD",
+                    severity=item.severity or "medium",
+                    resolution_status=item.resolution_status or "unresolved",
+                    side_by_side=item.side_by_side,
+                    _reason_code=item.reason_code.value if hasattr(item.reason_code, "value") else (str(item.reason_code) if item.reason_code else None),
+                    _confidence_score=item.confidence_score,
                     field_differences=[d.model_dump() for d in item.field_differences] if item.field_differences else None,
                     message=item.message,
                 )
@@ -1729,6 +1750,12 @@ def list_run_discrepancies(
     limit: int = 50,
     discrepancy_category: Optional[str] = None,
     match_status: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+    reason_code: Optional[str] = None,
+    source_alias: Optional[str] = None,
+    rule_failure_type: Optional[str] = None,
+    resolution_status: Optional[str] = None,
     sort_by: str = "source_row_number",
     sort_order: str = "asc",
 ) -> Tuple[int, List[VerificationDiscrepancy]]:
@@ -1739,9 +1766,21 @@ def list_run_discrepancies(
     valid_sort_fields = {
         "source_row_number": VerificationDiscrepancy.source_row_number,
         "target_row_number": VerificationDiscrepancy.target_row_number,
+        "source_row_index": VerificationDiscrepancy.source_row_number,
+        "target_row_index": VerificationDiscrepancy.target_row_number,
         "created_at": VerificationDiscrepancy.created_at,
         "match_status": VerificationDiscrepancy.match_status,
         "discrepancy_category": VerificationDiscrepancy.discrepancy_category,
+        "exposure_amount": VerificationDiscrepancy.exposure_amount,
+        "exposure": VerificationDiscrepancy.exposure_amount,
+        "variance_amount": VerificationDiscrepancy.variance_amount,
+        "variance": VerificationDiscrepancy.variance_amount,
+        "source_amount": VerificationDiscrepancy.source_amount,
+        "target_amount": VerificationDiscrepancy.target_amount,
+        "confidence_score": VerificationDiscrepancy._confidence_score,
+        "severity": VerificationDiscrepancy.severity,
+        "resolution_status": VerificationDiscrepancy.resolution_status,
+        "reason_code": VerificationDiscrepancy._reason_code,
     }
     clean_sort_by = sort_by.strip()
     if clean_sort_by not in valid_sort_fields:
@@ -1762,6 +1801,28 @@ def list_run_discrepancies(
         query = query.filter(VerificationDiscrepancy.discrepancy_category == discrepancy_category)
     if match_status:
         query = query.filter(VerificationDiscrepancy.match_status == match_status)
+    if min_amount is not None:
+        query = query.filter(func.coalesce(VerificationDiscrepancy.exposure_amount, 0.0) >= min_amount)
+    if max_amount is not None:
+        query = query.filter(func.coalesce(VerificationDiscrepancy.exposure_amount, 0.0) <= max_amount)
+    if reason_code:
+        query = query.filter(VerificationDiscrepancy._reason_code == reason_code)
+    if resolution_status:
+        query = query.filter(VerificationDiscrepancy.resolution_status == resolution_status)
+    if rule_failure_type:
+        query = query.filter(
+            or_(
+                VerificationDiscrepancy.discrepancy_category == rule_failure_type,
+                VerificationDiscrepancy._reason_code == rule_failure_type,
+            )
+        )
+    if source_alias:
+        query = query.filter(
+            or_(
+                cast(VerificationDiscrepancy.source_row_indices, String).like(f'%"{source_alias}"%'),
+                cast(VerificationDiscrepancy.source_records, String).like(f'%"{source_alias}"%'),
+            )
+        )
 
     total = query.count()
 
@@ -1775,6 +1836,64 @@ def list_run_discrepancies(
         .all()
     )
     return total, items
+
+
+def get_discrepancy_inspection(
+    db: Session,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    discrepancy_id: uuid.UUID,
+    current_user: Optional[User] = None,
+) -> SideBySideInspectionResponse:
+    """Retrieve detailed side-by-side inspection and normalization diffs for a specific discrepancy."""
+    get_verification_run(db, project_id, run_id, current_user=current_user)
+
+    disc = db.query(VerificationDiscrepancy).filter(
+        VerificationDiscrepancy.id == discrepancy_id,
+        VerificationDiscrepancy.run_id == run_id,
+    ).first()
+    if disc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Discrepancy record not found.",
+        )
+
+    side_by_side = disc.side_by_side
+    if not side_by_side:
+        from app.services.materiality_engine import build_side_by_side_payload
+        side_by_side = build_side_by_side_payload(disc)
+
+    field_comparisons = [
+        FieldComparisonDiff(**c) for c in (side_by_side.get("field_comparisons") or [])
+    ]
+
+    return SideBySideInspectionResponse(
+        id=str(disc.id),
+        run_id=disc.run_id,
+        key_values=disc.key_values,
+        match_status=disc.match_status,
+        discrepancy_category=disc.discrepancy_category,
+        reason_code=disc.reason_code,
+        confidence_score=disc.confidence_score,
+        severity=disc.severity or "medium",
+        source_amount=disc.source_amount,
+        target_amount=disc.target_amount,
+        variance_amount=disc.variance_amount,
+        exposure_amount=disc.exposure_amount,
+        currency=disc.currency or "USD",
+        source_row_index=disc.source_row_number,
+        target_row_index=disc.target_row_number,
+        source_row_indices=disc.source_row_indices,
+        raw_source_record=side_by_side.get("raw_source_record") or disc.source_record,
+        normalized_source_record=side_by_side.get("normalized_source_record"),
+        raw_target_record=side_by_side.get("raw_target_record") or disc.target_record,
+        normalized_target_record=side_by_side.get("normalized_target_record"),
+        field_comparisons=field_comparisons,
+        failed_rules=side_by_side.get("failed_rules") or [],
+        child_records=disc.child_records,
+        message=disc.message,
+        resolution_status=disc.resolution_status or "unresolved",
+    )
 
 
 def get_verification_run_summary(
@@ -2262,6 +2381,11 @@ def verify_multisource_datasets(
         status="completed",
     )
 
+    from app.services.materiality_engine import compute_record_materiality, compute_summary_materiality
+    for r in results:
+        compute_record_materiality(r)
+    summary = compute_summary_materiality(results, discrepancies, summary)
+
     return summary, results, discrepancies, records_by_source, missing_by_source
 
 
@@ -2448,6 +2572,16 @@ def create_and_execute_multisource_run(
                     child_records=item.child_records,
                     aggregated_amount=item.aggregated_amount,
                     expected_amount=item.expected_amount,
+                    source_amount=item.source_amount,
+                    target_amount=item.target_amount,
+                    variance_amount=item.variance_amount,
+                    exposure_amount=item.exposure_amount,
+                    currency=item.currency or "USD",
+                    severity=item.severity or "medium",
+                    resolution_status=item.resolution_status or "unresolved",
+                    side_by_side=item.side_by_side,
+                    _reason_code=item.reason_code.value if hasattr(item.reason_code, "value") else (str(item.reason_code) if item.reason_code else None),
+                    _confidence_score=item.confidence_score,
                     field_differences=[d.model_dump() for d in item.field_differences] if item.field_differences else None,
                     message=item.message,
                 )

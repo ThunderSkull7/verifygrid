@@ -15,6 +15,7 @@ from app.schemas.result import (
     DiscrepancyListResponse,
     MultiSourceVerificationRequest,
     MultiSourceVerificationResponse,
+    SideBySideInspectionResponse,
     VerificationRequest,
     VerificationResponse,
     VerificationRunListResponse,
@@ -23,6 +24,7 @@ from app.schemas.result import (
 from app.services.verification_engine import (
     create_and_execute_multisource_run,
     create_and_execute_verification_run,
+    get_discrepancy_inspection,
     get_verification_run,
     list_run_discrepancies,
     list_verification_runs,
@@ -182,7 +184,7 @@ def get_verification_run_endpoint(
     response_model=DiscrepancyListResponse,
     status_code=status.HTTP_200_OK,
     summary="Paginate and filter verification run discrepancies",
-    description="Retrieves paginated discrepancy results with optional category and match status filtering.",
+    description="Retrieves paginated discrepancy results with financial exposure sorting and range filtering.",
 )
 def list_run_discrepancies_endpoint(
     project_id: uuid.UUID,
@@ -191,6 +193,12 @@ def list_run_discrepancies_endpoint(
     limit: int = Query(50, ge=1, le=200),
     discrepancy_category: Optional[str] = Query(None),
     match_status: Optional[str] = Query(None),
+    min_amount: Optional[float] = Query(None, description="Minimum monetary exposure/amount"),
+    max_amount: Optional[float] = Query(None, description="Maximum monetary exposure/amount"),
+    reason_code: Optional[str] = Query(None, description="Decision reason code"),
+    source_alias: Optional[str] = Query(None, description="Multi-source participating alias"),
+    rule_failure_type: Optional[str] = Query(None, description="Rule violation or failure type"),
+    resolution_status: Optional[str] = Query(None, description="Resolution status ('resolved', 'unresolved')"),
     sort_by: str = Query("source_row_number", description="Field to sort by"),
     sort_order: str = Query("asc", pattern="^(asc|desc)$", description="'asc' or 'desc'"),
     current_user: User = Depends(get_current_user),
@@ -206,6 +214,12 @@ def list_run_discrepancies_endpoint(
         limit=limit,
         discrepancy_category=discrepancy_category,
         match_status=match_status,
+        min_amount=min_amount,
+        max_amount=max_amount,
+        reason_code=reason_code,
+        source_alias=source_alias,
+        rule_failure_type=rule_failure_type,
+        resolution_status=resolution_status,
         sort_by=sort_by,
         sort_order=sort_order,
     )
@@ -214,6 +228,30 @@ def list_run_discrepancies_endpoint(
         items=[DiscrepancyItemResponse.model_validate(d) for d in items],
         skip=skip,
         limit=limit,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/runs/{run_id}/results/{discrepancy_id}/inspect",
+    response_model=SideBySideInspectionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get side-by-side record inspection and field-level diffs",
+    description="Retrieves raw vs. normalized side-by-side comparison, field mismatches, and rule failure details for a discrepancy.",
+)
+def get_discrepancy_inspection_endpoint(
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    discrepancy_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SideBySideInspectionResponse:
+    """Get detailed side-by-side inspection for a discrepancy."""
+    return get_discrepancy_inspection(
+        db=db,
+        project_id=project_id,
+        run_id=run_id,
+        discrepancy_id=discrepancy_id,
+        current_user=current_user,
     )
 
 

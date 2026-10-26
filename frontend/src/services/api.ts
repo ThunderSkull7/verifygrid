@@ -28,6 +28,7 @@ import type {
   VerificationResponse,
   VerificationRun,
   VerificationRunListResponse,
+  SideBySideInspectionResponse,
 } from '../types';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
@@ -331,6 +332,12 @@ class ApiClient {
       limit?: number;
       discrepancy_category?: string;
       match_status?: string;
+      min_amount?: number;
+      max_amount?: number;
+      reason_code?: string;
+      source_alias?: string;
+      rule_failure_type?: string;
+      resolution_status?: string;
       sort_by?: string;
       sort_order?: 'asc' | 'desc';
     } = {}
@@ -340,11 +347,27 @@ class ApiClient {
     if (options.limit !== undefined) params.set('limit', String(options.limit));
     if (options.discrepancy_category) params.set('discrepancy_category', options.discrepancy_category);
     if (options.match_status) params.set('match_status', options.match_status);
+    if (options.min_amount !== undefined) params.set('min_amount', String(options.min_amount));
+    if (options.max_amount !== undefined) params.set('max_amount', String(options.max_amount));
+    if (options.reason_code) params.set('reason_code', options.reason_code);
+    if (options.source_alias) params.set('source_alias', options.source_alias);
+    if (options.rule_failure_type) params.set('rule_failure_type', options.rule_failure_type);
+    if (options.resolution_status) params.set('resolution_status', options.resolution_status);
     if (options.sort_by) params.set('sort_by', options.sort_by);
     if (options.sort_order) params.set('sort_order', options.sort_order);
 
     return this.request<DiscrepancyListResponse>(
       `/projects/${projectId}/runs/${runId}/results?${params.toString()}`
+    );
+  }
+
+  async inspectDiscrepancy(
+    projectId: string,
+    runId: string,
+    discrepancyId: string
+  ): Promise<SideBySideInspectionResponse> {
+    return this.request<SideBySideInspectionResponse>(
+      `/projects/${projectId}/runs/${runId}/results/${discrepancyId}/inspect`
     );
   }
 

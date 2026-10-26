@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   AggregationConfig,
   DateWindowRule,
+  FieldDifference,
   MultiSourceKeyRecommendation,
   MultiSourceVerificationRequest,
   MultiSourceVerificationResponse,
@@ -13,6 +14,7 @@ import type {
   SourceDefinition,
   SourceFile,
   VerificationRun,
+  VerificationResultItem,
   VersionedRuleConfig,
   WhereCondition,
 } from '../types';
@@ -20,6 +22,7 @@ import { api } from '../services/api';
 import { FileUploadSection } from './FileUploadSection';
 import { ProfilingQuarantineDrawer } from './ProfilingQuarantineDrawer';
 import { StatusBadge } from './StatusBadge';
+import { RecordInspectorDrawer } from './RecordInspectorDrawer';
 import {
   AlertCircle,
   ArrowRight,
@@ -44,6 +47,7 @@ import {
   Split,
   TableProperties,
   Trash2,
+  X,
 } from 'lucide-react';
 
 interface ReconciliationWizardProps {
@@ -137,6 +141,11 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [searchKey, setSearchKey] = useState<string>('');
+  const [wizardSortOption, setWizardSortOption] = useState<string>('exposure_desc');
+  const [wizardMinAmount, setWizardMinAmount] = useState<string>('');
+  const [wizardMaxAmount, setWizardMaxAmount] = useState<string>('');
+  const [selectedRecordForInspection, setSelectedRecordForInspection] =
+    useState<VerificationResultItem | null>(null);
 
   // --- Step 5: Sign-off ---
   const [signOffNote, setSignOffNote] = useState<string>('');
@@ -422,16 +431,49 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     }
   };
 
-  // Filtered results in Exception Grid
-  const filteredResults = (verificationResponse?.results || []).filter((item) => {
-    if (categoryFilter !== 'all' && item.discrepancy_category !== categoryFilter) return false;
-    if (statusFilter !== 'all' && item.match_status !== statusFilter) return false;
-    if (searchKey.trim()) {
-      const kStr = JSON.stringify(item.key_values).toLowerCase();
-      if (!kStr.includes(searchKey.toLowerCase())) return false;
-    }
-    return true;
-  });
+  // Filtered and sorted results in Exception Grid
+  const filteredResults: VerificationResultItem[] = useMemo(() => {
+    const minAmt = wizardMinAmount.trim() !== '' ? parseFloat(wizardMinAmount) : null;
+    const maxAmt = wizardMaxAmount.trim() !== '' ? parseFloat(wizardMaxAmount) : null;
+
+    const items: VerificationResultItem[] = (verificationResponse?.results || []).filter((item: VerificationResultItem) => {
+      if (categoryFilter !== 'all' && item.discrepancy_category !== categoryFilter) return false;
+      if (statusFilter !== 'all' && item.match_status !== statusFilter) return false;
+      if (searchKey.trim()) {
+        const kStr = JSON.stringify(item.key_values).toLowerCase();
+        if (!kStr.includes(searchKey.toLowerCase())) return false;
+      }
+      if (minAmt !== null && !isNaN(minAmt)) {
+        if ((item.exposure_amount ?? 0) < minAmt) return false;
+      }
+      if (maxAmt !== null && !isNaN(maxAmt)) {
+        if ((item.exposure_amount ?? 0) > maxAmt) return false;
+      }
+      return true;
+    });
+
+    return items.sort((a, b) => {
+      const expA = a.exposure_amount ?? 0;
+      const expB = b.exposure_amount ?? 0;
+      const varA = a.variance_amount ?? 0;
+      const varB = b.variance_amount ?? 0;
+
+      if (wizardSortOption === 'exposure_desc') return expB - expA;
+      if (wizardSortOption === 'exposure_asc') return expA - expB;
+      if (wizardSortOption === 'variance_desc') return varB - varA;
+      if (wizardSortOption === 'variance_asc') return varA - varB;
+      if (wizardSortOption === 'row_asc') return (a.source_row_number ?? 0) - (b.source_row_number ?? 0);
+      return 0;
+    });
+  }, [
+    verificationResponse?.results,
+    categoryFilter,
+    statusFilter,
+    searchKey,
+    wizardMinAmount,
+    wizardMaxAmount,
+    wizardSortOption,
+  ]);
 
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -1256,52 +1298,152 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               </button>
             </div>
 
-            {/* Quick Metrics Bar */}
+            {/* Financial Materiality Header */}
             {verificationResponse && (
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(4, 1fr)',
-                  gap: 12,
-                  marginBottom: 16,
-                  backgroundColor: 'var(--bg-subtle)',
-                  padding: '12px',
-                  borderRadius: 'var(--radius-sm)',
-                }}
-              >
-                <div>
-                  <span className="metric-label">Total Evaluated</span>
-                  <span className="metric-value" style={{ fontSize: '1.2rem' }}>
-                    {verificationResponse.results.length.toLocaleString()}
-                  </span>
+              <div style={{ marginBottom: 16 }}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: 12,
+                    marginBottom: 12,
+                  }}
+                >
+                  <div
+                    className="metric-card flat"
+                    style={{
+                      borderLeft: '4px solid var(--danger-color, #ef4444)',
+                      backgroundColor: 'rgba(239, 68, 68, 0.05)',
+                      padding: '12px 14px',
+                    }}
+                  >
+                    <span className="metric-label" style={{ fontSize: '0.75rem' }}>Gross Exception Exposure</span>
+                    <span
+                      className="metric-value text-danger"
+                      style={{ fontSize: '1.4rem', fontFamily: 'var(--font-mono)' }}
+                    >
+                      ${(verificationResponse.summary.gross_exposure ?? 0).toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </span>
+                    <span className="metric-foot" style={{ fontSize: '0.7rem' }}>
+                      Absolute sum across {verificationResponse.summary.total_discrepancies} exceptions
+                    </span>
+                  </div>
+
+                  <div
+                    className="metric-card flat"
+                    style={{
+                      borderLeft: '4px solid var(--accent, #6366f1)',
+                      backgroundColor: 'rgba(99, 102, 241, 0.05)',
+                      padding: '12px 14px',
+                    }}
+                  >
+                    <span className="metric-label" style={{ fontSize: '0.75rem' }}>Net Variance</span>
+                    <span
+                      className="metric-value"
+                      style={{
+                        fontSize: '1.4rem',
+                        fontFamily: 'var(--font-mono)',
+                        color: (verificationResponse.summary.net_variance ?? 0) === 0 ? 'var(--text-dim)' : 'var(--accent)',
+                      }}
+                    >
+                      {(verificationResponse.summary.net_variance ?? 0) > 0 ? '+$' : (verificationResponse.summary.net_variance ?? 0) < 0 ? '-$' : '$'}
+                      {Math.abs(verificationResponse.summary.net_variance ?? 0).toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </span>
+                    <span className="metric-foot" style={{ fontSize: '0.7rem' }}>
+                      {(verificationResponse.summary.net_variance ?? 0) > 0 ? 'Primary exceeds target' : (verificationResponse.summary.net_variance ?? 0) < 0 ? 'Target exceeds primary' : 'Zero directional variance'}
+                    </span>
+                  </div>
+
+                  <div
+                    className="metric-card flat"
+                    style={{
+                      borderLeft: '4px solid var(--success-color, #10b981)',
+                      backgroundColor: 'rgba(16, 185, 129, 0.05)',
+                      padding: '12px 14px',
+                    }}
+                  >
+                    <span className="metric-label" style={{ fontSize: '0.75rem' }}>Verified Total</span>
+                    <span
+                      className="metric-value text-success"
+                      style={{ fontSize: '1.4rem', fontFamily: 'var(--font-mono)' }}
+                    >
+                      ${(verificationResponse.summary.verified_amount ?? 0).toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </span>
+                    <span className="metric-foot" style={{ fontSize: '0.7rem' }}>
+                      {verificationResponse.summary.identical_matches} fully verified items
+                    </span>
+                  </div>
+
+                  <div
+                    className="metric-card flat"
+                    style={{
+                      borderLeft: '4px solid var(--warning-color, #f59e0b)',
+                      backgroundColor: 'rgba(245, 158, 11, 0.05)',
+                      padding: '12px 14px',
+                    }}
+                  >
+                    <span className="metric-label" style={{ fontSize: '0.75rem' }}>Outstanding Variance</span>
+                    <span
+                      className="metric-value text-warning"
+                      style={{ fontSize: '1.4rem', fontFamily: 'var(--font-mono)' }}
+                    >
+                      ${(verificationResponse.summary.outstanding_amount ?? verificationResponse.summary.gross_exposure ?? 0).toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </span>
+                    <span className="metric-foot" style={{ fontSize: '0.7rem' }}>
+                      Unreconciled / disputed total
+                    </span>
+                  </div>
                 </div>
-                <div>
-                  <span className="metric-label">Identical Matches</span>
-                  <span className="metric-value text-success" style={{ fontSize: '1.2rem' }}>
-                    {verificationResponse.summary.identical_matches.toLocaleString()}
-                  </span>
-                </div>
-                <div>
-                  <span className="metric-label">Field Mismatches</span>
-                  <span className="metric-value text-warning" style={{ fontSize: '1.2rem' }}>
-                    {verificationResponse.summary.field_mismatches.toLocaleString()}
-                  </span>
-                </div>
-                <div>
-                  <span className="metric-label">Missing Across Sources</span>
-                  <span className="metric-value text-danger" style={{ fontSize: '1.2rem' }}>
-                    {(
-                      verificationResponse.summary.unmatched_source_records +
-                      verificationResponse.summary.unmatched_target_records
-                    ).toLocaleString()}
-                  </span>
+
+                {/* Secondary Volume Counts Bar */}
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(4, 1fr)',
+                    gap: 8,
+                    backgroundColor: 'var(--bg-subtle)',
+                    padding: '8px 12px',
+                    borderRadius: 'var(--radius-xs)',
+                    fontSize: '0.78rem',
+                  }}
+                >
+                  <div>
+                    <span className="text-dim">Evaluated Records:</span>{' '}
+                    <strong>{verificationResponse.results.length.toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    <span className="text-dim">Identical:</span>{' '}
+                    <strong className="text-success">{verificationResponse.summary.identical_matches.toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    <span className="text-dim">Field Mismatches:</span>{' '}
+                    <strong className="text-warning">{verificationResponse.summary.field_mismatches.toLocaleString()}</strong>
+                  </div>
+                  <div>
+                    <span className="text-dim">Missing Records:</span>{' '}
+                    <strong className="text-danger">
+                      {(verificationResponse.summary.unmatched_source_records + verificationResponse.summary.unmatched_target_records).toLocaleString()}
+                    </strong>
+                  </div>
                 </div>
               </div>
             )}
 
-            {/* Filters Toolbar */}
-            <div className="toolbar" style={{ marginBottom: 12 }}>
-              <div className="search-box">
+            {/* Filters & Amount Sorting Toolbar */}
+            <div className="toolbar" style={{ marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
+              <div className="search-box" style={{ minWidth: 200 }}>
                 <Search size={15} />
                 <input
                   type="text"
@@ -1312,7 +1454,35 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 />
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {/* Amount Range Filter */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>Min $:</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="10"
+                  className="form-input"
+                  style={{ width: 80, padding: '4px 8px' }}
+                  placeholder="Min"
+                  value={wizardMinAmount}
+                  onChange={(e) => setWizardMinAmount(e.target.value)}
+                  aria-label="Filter by minimum amount"
+                />
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>Max:</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="10"
+                  className="form-input"
+                  style={{ width: 80, padding: '4px 8px' }}
+                  placeholder="Max"
+                  value={wizardMaxAmount}
+                  onChange={(e) => setWizardMaxAmount(e.target.value)}
+                  aria-label="Filter by maximum amount"
+                />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <Filter size={15} className="text-dim" />
                 <select
                   className="form-select filter-select"
@@ -1343,6 +1513,35 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   <option value="unmatched_split_record">Orphan split record</option>
                   <option value="duplicate_receipt">Duplicate receipt</option>
                 </select>
+
+                <select
+                  className="form-select filter-select"
+                  value={wizardSortOption}
+                  onChange={(e) => setWizardSortOption(e.target.value)}
+                  aria-label="Sort by financial exposure"
+                >
+                  <option value="exposure_desc">Exposure: High → Low</option>
+                  <option value="exposure_asc">Exposure: Low → High</option>
+                  <option value="variance_desc">Net Variance: High → Low</option>
+                  <option value="variance_asc">Net Variance: Low → High</option>
+                  <option value="row_asc">Lineage Row Index</option>
+                </select>
+
+                {(categoryFilter !== 'all' || statusFilter !== 'all' || searchKey || wizardMinAmount || wizardMaxAmount) && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => {
+                      setCategoryFilter('all');
+                      setStatusFilter('all');
+                      setSearchKey('');
+                      setWizardMinAmount('');
+                      setWizardMaxAmount('');
+                    }}
+                  >
+                    <X size={14} /> Clear
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1352,96 +1551,114 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 <thead>
                   <tr>
                     <th style={{ width: 140 }}>Key Values</th>
-                    <th style={{ width: 130 }}>Match Status</th>
+                    <th style={{ width: 120 }}>Match Status</th>
+                    <th style={{ width: 120 }}>Exposure ($)</th>
                     <th>Source Lineage (Row # by Source)</th>
                     <th>Differences / Outcome</th>
+                    <th style={{ width: 70, textAlign: 'center' }}>Inspect</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredResults.length === 0 ? (
                     <tr>
-                      <td colSpan={4} style={{ textAlign: 'center', padding: '36px' }}>
+                      <td colSpan={6} style={{ textAlign: 'center', padding: '36px' }}>
                         No records match your filters.
                       </td>
                     </tr>
                   ) : (
-                    filteredResults.slice(0, 50).map((row) => (
-                      <tr key={row.id}>
-                        <td>
-                          <code className="key-code">{JSON.stringify(row.key_values)}</code>
-                        </td>
-                        <td>
-                          <StatusBadge status={row.match_status} />
-                        </td>
-                        <td>
-                          {row.source_row_indices ? (
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                              {Object.entries(row.source_row_indices).map(([alias, rIdx]) => (
-                                <span
-                                  key={alias}
-                                  className="badge"
-                                  style={{
-                                    backgroundColor: rIdx ? 'var(--bg-card-hover)' : 'var(--danger-soft)',
-                                    color: rIdx ? 'var(--text-main)' : 'var(--danger-text)',
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: '0.75rem',
-                                  }}
-                                >
-                                  <strong>{alias}:</strong> {rIdx ? `Row ${rIdx}` : 'Missing'}
-                                </span>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="text-dim">Row {row.source_row_number ?? '—'}</span>
-                          )}
-                        </td>
-                        <td>
-                          {row.child_records && row.child_records.length > 0 && (
-                            <div style={{ marginBottom: 6 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                                <span className="badge badge-accent" style={{ fontSize: '0.75rem' }}>
-                                  {row.child_records.length} Split Installments
+                    filteredResults.slice(0, 100).map((row: VerificationResultItem) => {
+                      const exp = row.exposure_amount ?? 0;
+                      return (
+                        <tr
+                          key={row.id}
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => setSelectedRecordForInspection(row)}
+                          className="hover-row"
+                        >
+                          <td>
+                            <code className="key-code">{JSON.stringify(row.key_values)}</code>
+                          </td>
+                          <td>
+                            <StatusBadge status={row.match_status} />
+                          </td>
+                          <td>
+                            <span
+                              style={{
+                                fontFamily: 'var(--font-mono)',
+                                fontWeight: exp > 0 ? 600 : 400,
+                                color: exp >= 1000 ? 'var(--danger-text)' : exp > 0 ? 'var(--warning-text)' : 'var(--text-dim)',
+                              }}
+                            >
+                              ${exp.toFixed(2)}
+                            </span>
+                          </td>
+                          <td>
+                            {row.source_row_indices ? (
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                {Object.entries(row.source_row_indices).map(([alias, rIdx]) => (
+                                  <span
+                                    key={alias}
+                                    className="badge"
+                                    style={{
+                                      backgroundColor: rIdx ? 'var(--bg-card-hover)' : 'var(--danger-soft)',
+                                      color: rIdx ? 'var(--text-main)' : 'var(--danger-text)',
+                                      fontFamily: 'var(--font-mono)',
+                                      fontSize: '0.72rem',
+                                    }}
+                                  >
+                                    <strong>{alias}:</strong> {rIdx ? `Row ${rIdx}` : 'Missing'}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-dim">Row #{row.source_row_number ?? row.source_row_index ?? '—'}</span>
+                            )}
+                          </td>
+                          <td>
+                            {row.child_records && row.child_records.length > 0 && (
+                              <div style={{ marginBottom: 4 }}>
+                                <span className="badge badge-accent" style={{ fontSize: '0.72rem', marginRight: 6 }}>
+                                  {row.child_records.length} Installments
                                 </span>
                                 {row.aggregated_amount != null && row.expected_amount != null && (
-                                  <span style={{ fontSize: '0.78rem', fontFamily: 'var(--font-mono)' }}>
+                                  <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
                                     Sum: <strong>${row.aggregated_amount.toFixed(2)}</strong> (Parent: ${row.expected_amount.toFixed(2)})
                                   </span>
                                 )}
                               </div>
-                              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                                {row.child_records.map((c, i) => (
-                                  <span
-                                    key={i}
-                                    className="badge"
-                                    style={{
-                                      backgroundColor: 'var(--bg-subtle)',
-                                      fontSize: '0.72rem',
-                                      padding: '2px 6px',
-                                      fontFamily: 'var(--font-mono)',
-                                    }}
-                                  >
-                                    #{c.source_row_index} {c.receipt_id ? `rcpt:${c.receipt_id}` : `rec:${c.record_id}`}: ${c.amount}
-                                  </span>
+                            )}
+                            {row.field_differences && row.field_differences.length > 0 ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                {row.field_differences.slice(0, 2).map((d: FieldDifference, i: number) => (
+                                  <div key={i} style={{ fontSize: '0.75rem' }}>
+                                    <strong className="text-accent">{d.field_name}:</strong>{' '}
+                                    <span>{String(d.source_value)}</span> ≠{' '}
+                                    <span style={{ color: 'var(--warning-text)' }}>{String(d.target_value)}</span>
+                                  </div>
                                 ))}
                               </div>
-                            </div>
-                          )}
-                          {row.field_differences && row.field_differences.length > 0 ? (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                              {row.field_differences.map((d, i) => (
-                                <div key={i} style={{ fontSize: '0.78rem' }}>
-                                  <strong className="text-accent">{d.field_name}:</strong>{' '}
-                                  <span>{String(d.source_value)}</span> ≠{' '}
-                                  <span style={{ color: 'var(--warning-text)' }}>{String(d.target_value)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="text-dim">{row.message || 'Identical match'}</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))
+                            ) : (
+                              <span className="text-dim">{row.message || 'Identical match'}</span>
+                            )}
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              style={{ padding: '3px 6px' }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedRecordForInspection(row);
+                              }}
+                              title="Inspect Side-by-Side Record"
+                              aria-label="Inspect Record"
+                            >
+                              <Eye size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -1614,6 +1831,15 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
           onClose={() => setDrawerFile(null)}
         />
       )}
+
+      {/* Side-by-Side Record Inspector Drawer */}
+      <RecordInspectorDrawer
+        isOpen={Boolean(selectedRecordForInspection)}
+        onClose={() => setSelectedRecordForInspection(null)}
+        record={selectedRecordForInspection}
+        projectId={project.id}
+        runId={createdRun?.id}
+      />
     </div>
   );
 };

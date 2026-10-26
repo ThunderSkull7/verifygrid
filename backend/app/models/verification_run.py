@@ -191,6 +191,55 @@ class VerificationDiscrepancy(Base):
         Float,
         nullable=True,
     )
+    source_amount: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    target_amount: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    variance_amount: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    exposure_amount: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        index=True,
+    )
+    currency: Mapped[Optional[str]] = mapped_column(
+        String(10),
+        nullable=True,
+        default="USD",
+    )
+    severity: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+        default="medium",
+        index=True,
+    )
+    resolution_status: Mapped[Optional[str]] = mapped_column(
+        String(30),
+        nullable=True,
+        default="unresolved",
+        index=True,
+    )
+    side_by_side: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    _reason_code: Mapped[Optional[str]] = mapped_column(
+        "reason_code",
+        String(100),
+        nullable=True,
+        index=True,
+    )
+    _confidence_score: Mapped[Optional[float]] = mapped_column(
+        "confidence_score",
+        Float,
+        nullable=True,
+    )
     message: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
@@ -217,6 +266,8 @@ class VerificationDiscrepancy(Base):
 
     @property
     def reason_code(self) -> Optional[str]:
+        if self._reason_code:
+            return self._reason_code
         if self.field_differences:
             for fd in self.field_differences:
                 rc = fd.get("reason_code")
@@ -239,8 +290,14 @@ class VerificationDiscrepancy(Base):
         }
         return status_to_reason.get(self.match_status, "FIELD_MISMATCH")
 
+    @reason_code.setter
+    def reason_code(self, val: Optional[str]) -> None:
+        self._reason_code = val
+
     @property
     def confidence_score(self) -> Optional[float]:
+        if self._confidence_score is not None:
+            return self._confidence_score
         if self.field_differences:
             for fd in self.field_differences:
                 cs = fd.get("confidence_score")
@@ -249,3 +306,7 @@ class VerificationDiscrepancy(Base):
         if self.match_status == "identical":
             return 1.0
         return 0.0
+
+    @confidence_score.setter
+    def confidence_score(self, val: Optional[float]) -> None:
+        self._confidence_score = val

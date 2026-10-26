@@ -147,6 +147,14 @@ export interface VerificationResultItem {
   child_records?: any[] | null;
   aggregated_amount?: number | null;
   expected_amount?: number | null;
+  source_amount?: number | null;
+  target_amount?: number | null;
+  variance_amount?: number | null;
+  exposure_amount?: number | null;
+  currency?: string | null;
+  severity?: string | null;
+  resolution_status?: string | null;
+  side_by_side?: Record<string, any> | null;
   field_differences?: FieldDifference[];
   message?: string | null;
 }
@@ -168,6 +176,15 @@ export interface VerificationSummary {
   conflicting_duplicate_records?: number;
   total_discrepancies: number;
   status: string;
+
+  // Financial Materiality & Exposure Metrics
+  gross_exposure?: number;
+  net_variance?: number;
+  claimed_amount?: number;
+  verified_amount?: number;
+  outstanding_amount?: number;
+  currency?: string;
+  exposure_by_currency?: Record<string, Record<string, number>> | null;
 }
 
 export interface VerificationRequest {
@@ -236,6 +253,8 @@ export interface DiscrepancyItemResponse {
   key_values: Record<string, any>;
   source_row_number?: number | null;
   target_row_number?: number | null;
+  source_row_index?: number | null;
+  target_row_index?: number | null;
   source_row_numbers?: number[] | null;
   target_row_numbers?: number[] | null;
   source_row_indices?: Record<string, number | null> | null;
@@ -244,6 +263,19 @@ export interface DiscrepancyItemResponse {
   source_presence?: Record<string, boolean> | null;
   source_record?: Record<string, any> | null;
   target_record?: Record<string, any> | null;
+  child_records?: any[] | null;
+  aggregated_amount?: number | null;
+  expected_amount?: number | null;
+  source_amount?: number | null;
+  target_amount?: number | null;
+  variance_amount?: number | null;
+  exposure_amount?: number | null;
+  currency?: string | null;
+  severity?: string | null;
+  resolution_status?: string | null;
+  side_by_side?: Record<string, any> | null;
+  reason_code?: string | null;
+  confidence_score?: number | null;
   field_differences?: FieldDifference[] | null;
   message?: string | null;
   created_at: string;
@@ -254,6 +286,59 @@ export interface DiscrepancyListResponse {
   items: DiscrepancyItemResponse[];
   skip: number;
   limit: number;
+}
+
+export interface FieldComparisonDiff {
+  field_name: string;
+  source_field?: string | null;
+  target_field?: string | null;
+  raw_source_value?: any;
+  normalized_source_value?: any;
+  raw_target_value?: any;
+  normalized_target_value?: any;
+  is_match: boolean;
+  difference_type?: string | null;
+  reason_code?: string | null;
+  message?: string | null;
+}
+
+export interface SideBySideInspectionResponse {
+  id: string;
+  run_id?: string | null;
+  key_values: Record<string, any>;
+  match_status: MatchStatus;
+  discrepancy_category: DiscrepancyCategory;
+  reason_code?: string | null;
+  confidence_score?: number | null;
+  severity: string;
+
+  source_amount?: number | null;
+  target_amount?: number | null;
+  variance_amount?: number | null;
+  exposure_amount?: number | null;
+  currency?: string | null;
+
+  source_row_index?: number | null;
+  target_row_index?: number | null;
+  source_row_indices?: Record<string, number | null> | null;
+  missing_in_sources?: string[] | null;
+  source_presence?: Record<string, boolean> | null;
+
+  raw_source_record?: Record<string, any> | null;
+  normalized_source_record?: Record<string, any> | null;
+  raw_target_record?: Record<string, any> | null;
+  normalized_target_record?: Record<string, any> | null;
+
+  field_comparisons: FieldComparisonDiff[];
+  failed_rules: Array<{
+    rule?: string;
+    field?: string;
+    description?: string;
+    discrepancy_category?: string;
+  }>;
+  child_records?: any[] | null;
+  message?: string | null;
+  resolution_status?: string | null;
 }
 
 // --- Batch 2: Data Profiling & Quarantine Types ---
