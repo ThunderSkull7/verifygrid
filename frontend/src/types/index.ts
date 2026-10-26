@@ -862,6 +862,68 @@ export interface AuditVerificationResponse {
   message: string;
 }
 
+export interface ExpectedSourceSchema {
+  alias: string;
+  original_filename_hint?: string;
+  key_columns: string[];
+  field_mapping: Record<string, string>;
+  expected_columns: string[];
+  is_primary?: boolean;
+}
+
+export interface RecipeQuarantineDefaults {
+  exclude_quarantined_rows?: boolean;
+  auto_quarantine_duplicates?: boolean;
+  auto_quarantine_malformed_dates?: boolean;
+  auto_quarantine_negative_currency?: boolean;
+}
+
+export interface VerificationRecipe {
+  version: string;
+  recipe_name: string;
+  description?: string;
+  exported_at?: string;
+  created_by?: string;
+  unified_keys: string[];
+  numeric_tolerance?: number;
+  sources: ExpectedSourceSchema[];
+  rule_config?: Record<string, any>;
+  quarantine_defaults?: RecipeQuarantineDefaults;
+  metadata?: Record<string, any>;
+}
+
+export interface RecipeApplyRequest {
+  recipe: VerificationRecipe;
+  file_ids: string[];
+  file_mappings?: Record<string, string>;
+}
+
+export interface RecipeSourceMatch {
+  alias: string;
+  matched_file_id?: string | null;
+  matched_filename?: string | null;
+  confidence_score: number;
+  matched_columns: string[];
+  missing_key_columns: string[];
+  is_compatible: boolean;
+}
+
+export interface RecipeApplyValidationResult {
+  valid: boolean;
+  total_sources_expected: number;
+  total_sources_matched: number;
+  matches: RecipeSourceMatch[];
+  suggested_source_aliases: Record<string, string>;
+  suggested_file_key_columns: Record<string, string[]>;
+  suggested_unified_keys: string[];
+  suggested_column_mappings: Record<string, Record<string, string>>;
+  rule_config?: Record<string, any>;
+  numeric_tolerance?: number;
+  quarantine_defaults?: Record<string, any>;
+  validation_errors: string[];
+  validation_warnings: string[];
+}
+
 
 
 

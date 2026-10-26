@@ -24,6 +24,7 @@ import {
 import { StatusBadge } from './StatusBadge';
 import { RecordInspectorDrawer } from './RecordInspectorDrawer';
 import { BulkReviewModal } from './BulkReviewModal';
+import { ExportActionControls } from './ExportActionControls';
 import { computeLocalClusters } from '../utils/clustering';
 
 interface VerificationResultsViewProps {
@@ -267,31 +268,38 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
           <div className="row-wrap">
             <StatusBadge status={summary.status} />
             {run && (
-              <div className="row-wrap">
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => handleDownload('csv')}
-                  disabled={downloadingFormat !== null}
-                >
-                  {downloadingFormat === 'csv' ? <span className="spinner" /> : <Download size={14} />}
-                  CSV
-                </button>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => handleDownload('xlsx')}
-                  disabled={downloadingFormat !== null}
-                >
-                  {downloadingFormat === 'xlsx' ? <span className="spinner" /> : <Download size={14} />}
-                  Excel
-                </button>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => handleDownload('json')}
-                  disabled={downloadingFormat !== null}
-                >
-                  {downloadingFormat === 'json' ? <span className="spinner" /> : <Download size={14} />}
-                  JSON
-                </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+                <div className="row-wrap">
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleDownload('csv')}
+                    disabled={downloadingFormat !== null}
+                  >
+                    {downloadingFormat === 'csv' ? <span className="spinner" /> : <Download size={14} />}
+                    CSV
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleDownload('xlsx')}
+                    disabled={downloadingFormat !== null}
+                  >
+                    {downloadingFormat === 'xlsx' ? <span className="spinner" /> : <Download size={14} />}
+                    Excel
+                  </button>
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => handleDownload('json')}
+                    disabled={downloadingFormat !== null}
+                  >
+                    {downloadingFormat === 'json' ? <span className="spinner" /> : <Download size={14} />}
+                    JSON
+                  </button>
+                </div>
+                <ExportActionControls
+                  projectId={projectId}
+                  runId={run.id}
+                  size="sm"
+                />
               </div>
             )}
           </div>

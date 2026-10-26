@@ -21,6 +21,7 @@ import {
 import { StatusBadge } from './StatusBadge';
 import { VerificationResultsView } from './VerificationResultsView';
 import { CryptographicAuditViewer } from './CryptographicAuditViewer';
+import { ExportActionControls } from './ExportActionControls';
 
 interface AuditHistoryViewProps {
   project: Project;
@@ -371,14 +372,23 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
 
       {selectedRun && (
         <div>
-          <div className="section-heading-row">
+          <div className="section-heading-row" style={{ flexWrap: 'wrap', gap: 12 }}>
             <h2 className="section-title">
               Run <code className="run-id">{selectedRun.id.slice(0, 8)}</code> —{' '}
               <StatusBadge status={selectedRun.status} />
             </h2>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={closeDetail}>
-              Close
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              {selectedRun.status === 'completed' && (
+                <ExportActionControls
+                  projectId={project.id}
+                  runId={selectedRun.id}
+                  size="sm"
+                />
+              )}
+              <button type="button" className="btn btn-secondary btn-sm" onClick={closeDetail}>
+                Close
+              </button>
+            </div>
           </div>
 
           {selectedRun.status === 'failed' && (

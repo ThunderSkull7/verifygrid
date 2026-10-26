@@ -43,6 +43,9 @@ import type {
   ProposeSignOffRequest,
   RejectSignOffRequest,
   SignOffDetailsResponse,
+  RecipeApplyRequest,
+  RecipeApplyValidationResult,
+  VerificationRecipe,
 } from '../types';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
@@ -524,6 +527,112 @@ class ApiClient {
     a.click();
     window.URL.revokeObjectURL(downloadUrl);
     a.remove();
+  }
+
+  // --- Batch 8: Executive Audit Workbook & Golden Record Exports ---
+  async downloadAuditWorkbook(projectId: string, runId: string): Promise<void> {
+    const url = `${BASE_URL}/projects/${projectId}/runs/${runId}/audit-workbook/export`;
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(`Failed to download audit workbook: HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition');
+    let filename = `audit_workbook_${runId}.xlsx`;
+    if (disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      if (match && match[1]) {
+        filename = match[1];
+      }
+    }
+
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(downloadUrl);
+    a.remove();
+  }
+
+  async downloadGoldenRecord(
+    projectId: string,
+    runId: string,
+    format: 'csv' | 'json' | 'xlsx' = 'csv',
+    policy: string = 'ONLY_VERIFIED_AND_APPROVED'
+  ): Promise<void> {
+    const params = new URLSearchParams({
+      format,
+      policy,
+    });
+    const url = `${BASE_URL}/projects/${projectId}/runs/${runId}/golden-record/export?${params.toString()}`;
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(`Failed to download golden record: HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition');
+    let filename = `golden_record_${runId}.${format}`;
+    if (disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      if (match && match[1]) {
+        filename = match[1];
+      }
+    }
+
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(downloadUrl);
+    a.remove();
+  }
+
+  // --- Batch 8: Reusable Verification Recipes (.verifygrid.json) ---
+  async getRecipe(projectId: string, runId: string, download = false): Promise<VerificationRecipe> {
+    const recipe = await this.request<VerificationRecipe>(`/projects/${projectId}/runs/${runId}/recipe`);
+    if (download) {
+      const jsonStr = JSON.stringify(recipe, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const filename = `${recipe.recipe_name.toLowerCase().replace(/[^a-z0-9_-]/g, '_')}.verifygrid.json`;
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(downloadUrl);
+      a.remove();
+    }
+    return recipe;
+  }
+
+  async applyRecipe(
+    projectId: string,
+    payload: RecipeApplyRequest
+  ): Promise<RecipeApplyValidationResult> {
+    return this.request<RecipeApplyValidationResult>(
+      `/projects/${projectId}/recipes/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
   }
 
   // --- Maker-Checker Governance Endpoints ---

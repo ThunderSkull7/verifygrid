@@ -27,10 +27,12 @@ import { StatusBadge } from './StatusBadge';
 import { RecordInspectorDrawer } from './RecordInspectorDrawer';
 import { BulkReviewModal } from './BulkReviewModal';
 import { CryptographicAuditViewer } from './CryptographicAuditViewer';
+import { ExportActionControls } from './ExportActionControls';
 import { computeLocalClusters } from '../utils/clustering';
 import {
   AlertCircle,
   ArrowRight,
+  Upload,
   Calendar,
   Check,
   CheckCircle2,
@@ -118,6 +120,60 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   const [recommendations, setRecommendations] = useState<MultiSourceKeyRecommendation[]>([]);
   const [loadingRecommendations, setLoadingRecommendations] = useState<boolean>(false);
   const [recError, setRecError] = useState<string | null>(null);
+
+  // Recipe Import State (Batch 8)
+  const [recipeImportLoading, setRecipeImportLoading] = useState<boolean>(false);
+  const [recipeImportMsg, setRecipeImportMsg] = useState<{ text: string; isError: boolean } | null>(null);
+
+  const handleRecipeImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setRecipeImportLoading(true);
+    setRecipeImportMsg(null);
+    try {
+      const text = await file.text();
+      const recipe = JSON.parse(text);
+      const applyResult = await api.applyRecipe(project.id, {
+        recipe,
+        file_ids: uploadedDatasets.map((d) => d.id),
+      });
+
+      if (!applyResult.valid && applyResult.validation_errors.length > 0) {
+        setRecipeImportMsg({
+          text: `Recipe validation failed: ${applyResult.validation_errors.join('; ')}`,
+          isError: true,
+        });
+        return;
+      }
+
+      if (Object.keys(applyResult.suggested_source_aliases).length > 0) {
+        setSourceAliases((prev) => ({ ...prev, ...applyResult.suggested_source_aliases }));
+      }
+      if (Object.keys(applyResult.suggested_file_key_columns).length > 0) {
+        setFileKeyColumns((prev) => ({ ...prev, ...applyResult.suggested_file_key_columns }));
+      }
+      if (applyResult.suggested_unified_keys.length > 0) {
+        setUnifiedKeys(applyResult.suggested_unified_keys);
+      }
+      if (applyResult.numeric_tolerance !== undefined) {
+        setNumericTolerance(applyResult.numeric_tolerance);
+      }
+
+      setRecipeImportMsg({
+        text: `Recipe '${recipe.recipe_name}' applied! Matched ${applyResult.total_sources_matched}/${applyResult.total_sources_expected} sources. Blueprint updated.`,
+        isError: false,
+      });
+      setTimeout(() => setRecipeImportMsg(null), 5000);
+    } catch (err: any) {
+      setRecipeImportMsg({
+        text: `Failed to import recipe: ${err.message || 'Invalid JSON format'}`,
+        isError: true,
+      });
+    } finally {
+      setRecipeImportLoading(false);
+      e.target.value = '';
+    }
+  };
 
   // --- Step 3: Rules & Tolerances ---
   const [numericTolerance, setNumericTolerance] = useState<number>(0.0);
@@ -817,14 +873,42 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         {/* ================= STEP 2: BLUEPRINT ================= */}
         {currentStep === 2 && (
           <div>
-            <div style={{ marginBottom: 20 }}>
-              <h3 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Layers size={18} className="text-accent" /> Step 2: Blueprint &amp; Multi-Source Key Mapping
-              </h3>
-              <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
-                Assign meaningful aliases, select the primary baseline source, and configure matching join keys.
-              </p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Layers size={18} className="text-accent" /> Step 2: Blueprint &amp; Multi-Source Key Mapping
+                </h3>
+                <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
+                  Assign meaningful aliases, select the primary baseline source, and configure matching join keys.
+                </p>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <label
+                  className="btn btn-secondary btn-sm"
+                  style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6, margin: 0 }}
+                  title="Upload a saved .verifygrid.json recipe to restore mappings and rules"
+                >
+                  {recipeImportLoading ? <span className="spinner" /> : <Upload size={14} className="text-accent" />}
+                  Import Recipe (.verifygrid.json)
+                  <input
+                    type="file"
+                    accept=".json,.verifygrid.json"
+                    onChange={handleRecipeImport}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+              </div>
             </div>
+
+            {recipeImportMsg && (
+              <div
+                className={`alert ${recipeImportMsg.isError ? 'alert-error' : 'alert-success'}`}
+                style={{ marginBottom: 16 }}
+              >
+                {recipeImportMsg.isError ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />}
+                <span>{recipeImportMsg.text}</span>
+              </div>
+            )}
 
             {/* Candidate Key Recommendations Banner */}
             <div
@@ -2238,36 +2322,47 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   </div>
                 </div>
 
-                {/* Export Report Actions */}
+                {/* Export Report Actions (Batch 8 Multi-Sheet Workbook, Golden Records & Recipes) */}
                 <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 16, marginBottom: 16 }}>
                   <label style={{ fontSize: '0.9rem', fontWeight: 600, display: 'block', marginBottom: 10 }}>
                     Export Discrepancy &amp; Reconciliation Reports:
                   </label>
-                  <div style={{ display: 'flex', gap: 10 }}>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => void handleExport('csv')}
-                      disabled={Boolean(exportingFormat)}
-                    >
-                      <Download size={14} /> CSV Report
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => void handleExport('xlsx')}
-                      disabled={Boolean(exportingFormat)}
-                    >
-                      <Download size={14} /> Excel Spreadsheet
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => void handleExport('json')}
-                      disabled={Boolean(exportingFormat)}
-                    >
-                      <Download size={14} /> JSON Dataset
-                    </button>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => void handleExport('csv')}
+                        disabled={Boolean(exportingFormat)}
+                      >
+                        <Download size={14} /> CSV Report
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => void handleExport('xlsx')}
+                        disabled={Boolean(exportingFormat)}
+                      >
+                        <Download size={14} /> Excel Spreadsheet
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => void handleExport('json')}
+                        disabled={Boolean(exportingFormat)}
+                      >
+                        <Download size={14} /> JSON Dataset
+                      </button>
+                    </div>
+
+                    {(verificationResponse?.run_id || createdRun?.id) && (
+                      <div style={{ paddingTop: 8, borderTop: '1px dashed var(--border-color)' }}>
+                        <ExportActionControls
+                          projectId={project.id}
+                          runId={verificationResponse?.run_id || createdRun?.id || ''}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
 
