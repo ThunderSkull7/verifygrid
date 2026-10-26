@@ -268,7 +268,7 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
           </div>
         ) : (
           <div className="table-container">
-            <table className="data-table">
+            <table className="data-table dense">
               <thead>
                 <tr>
                   <th>Run</th>

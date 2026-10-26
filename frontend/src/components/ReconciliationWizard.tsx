@@ -103,6 +103,13 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   onRunCompleted,
 }) => {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
+  const [maxVisitedStep, setMaxVisitedStep] = useState<WizardStep>(1);
+
+  // Synchronize maxVisitedStep for non-destructive forward/backward navigation
+  const goToStep = useCallback((step: WizardStep) => {
+    setCurrentStep(step);
+    setMaxVisitedStep((prev) => Math.max(prev, step) as WizardStep);
+  }, []);
 
   // --- Step 1: Ingestion & Drawer ---
   const [drawerFile, setDrawerFile] = useState<{ id: string; name: string } | null>(null);
@@ -217,6 +224,20 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   const [verificationResponse, setVerificationResponse] =
     useState<MultiSourceVerificationResponse | null>(null);
   const [createdRun, setCreatedRun] = useState<VerificationRun | null>(null);
+
+  // Determine if a step is reachable without destructive loss of inputs
+  const isStepReachable = useCallback(
+    (stepNum: number) => {
+      if (stepNum === 1) return true;
+      if (stepNum <= maxVisitedStep) return true;
+      if (stepNum === 2 && uploadedDatasets.length >= 2) return true;
+      if (stepNum === 3 && uploadedDatasets.length >= 2 && unifiedKeys.length > 0) return true;
+      if (stepNum === 4 && verificationResponse != null) return true;
+      if (stepNum === 5 && (createdRun != null || verificationResponse != null)) return true;
+      return false;
+    },
+    [maxVisitedStep, uploadedDatasets.length, unifiedKeys.length, verificationResponse, createdRun],
+  );
 
   // View Mode: Record Grid vs Exception Clusters
   const [wizardViewMode, setWizardViewMode] = useState<'records' | 'clusters'>('records');
@@ -513,7 +534,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         console.warn('Persistent run creation error (in-memory results preserved):', runErr);
       }
 
-      setCurrentStep(4);
+      goToStep(4);
     } catch (err: any) {
       setRunError(err.message || 'Multi-source reconciliation failed.');
     } finally {
@@ -753,8 +774,10 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
       {/* 5-Step Stepper Header */}
-      <div
+      <nav
         className="wizard-stepper-header"
+        aria-label="Reconciliation workflow steps"
+        role="tablist"
         style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(5, 1fr)',
@@ -763,25 +786,42 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         }}
       >
         {STEPS.map((s) => {
-          const isCompleted = currentStep > s.num;
-          const isActive = currentStep === s.num;
+          const isCurrent = currentStep === s.num;
+          const isCompleted = s.num < currentStep;
+          const isReachable = isStepReachable(s.num);
+          const isLocked = !isReachable;
+
+          const stepStatusLabel = isCurrent
+            ? 'Active'
+            : isCompleted
+            ? 'Completed'
+            : isReachable
+            ? 'Unlocked'
+            : 'Locked';
+
           return (
             <button
               key={s.num}
               type="button"
-              className={`stepper-step ${isActive ? 'active' : ''} ${isCompleted ? 'completed' : ''}`}
+              role="tab"
+              aria-selected={isCurrent}
+              aria-current={isCurrent ? 'step' : undefined}
+              aria-disabled={isLocked}
+              aria-label={`Step ${s.num}: ${s.title} — ${s.desc} (${stepStatusLabel})`}
+              className={`stepper-step ${isCurrent ? 'active' : ''} ${isCompleted ? 'completed' : ''} ${isLocked ? 'locked' : ''}`}
               onClick={() => {
-                // Allow jumping to completed or active steps freely without losing state
-                if (isCompleted || isActive) {
-                  setCurrentStep(s.num as WizardStep);
+                if (isReachable) {
+                  goToStep(s.num as WizardStep);
                 }
               }}
+              disabled={isLocked}
               style={{
                 padding: '14px 16px',
                 border: 'none',
-                background: isActive ? 'var(--bg-subtle)' : 'transparent',
-                borderBottom: isActive ? '3px solid var(--primary)' : '3px solid transparent',
-                cursor: isCompleted || isActive ? 'pointer' : 'not-allowed',
+                background: isCurrent ? 'var(--bg-subtle)' : 'transparent',
+                borderBottom: isCurrent ? '3px solid var(--primary)' : '3px solid transparent',
+                cursor: isReachable ? 'pointer' : 'not-allowed',
+                opacity: isLocked ? 0.6 : 1,
                 textAlign: 'left',
                 display: 'flex',
                 alignItems: 'center',
@@ -791,30 +831,40 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             >
               <div
                 style={{
-                  width: 28,
-                  height: 28,
+                  width: 30,
+                  height: 30,
                   borderRadius: '50%',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   fontSize: '0.82rem',
                   fontWeight: 600,
-                  backgroundColor: isCompleted
+                  flexShrink: 0,
+                  backgroundColor: isCurrent
+                    ? 'var(--primary)'
+                    : isCompleted
                     ? 'var(--success)'
-                    : isActive
-                      ? 'var(--primary)'
-                      : 'var(--bg-card-hover)',
-                  color: isCompleted || isActive ? '#ffffff' : 'var(--text-muted)',
+                    : isLocked
+                    ? 'var(--bg-card-hover)'
+                    : 'var(--bg-subtle)',
+                  color: isCurrent || isCompleted ? '#ffffff' : isLocked ? 'var(--text-dim)' : 'var(--text-main)',
+                  boxShadow: isCurrent ? '0 0 0 3px var(--primary-glow)' : 'none',
                 }}
               >
-                {isCompleted ? <Check size={15} /> : s.num}
+                {isCompleted ? (
+                  <Check size={16} strokeWidth={2.5} />
+                ) : isLocked ? (
+                  <Lock size={13} />
+                ) : (
+                  s.num
+                )}
               </div>
               <div style={{ overflow: 'hidden' }}>
                 <div
                   style={{
                     fontSize: '0.88rem',
-                    fontWeight: isActive ? 600 : 500,
-                    color: isActive ? 'var(--text-main)' : 'var(--text-muted)',
+                    fontWeight: isCurrent ? 600 : 500,
+                    color: isCurrent ? 'var(--text-main)' : isLocked ? 'var(--text-dim)' : 'var(--text-muted)',
                     whiteSpace: 'nowrap',
                   }}
                 >
@@ -827,7 +877,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             </button>
           );
         })}
-      </div>
+      </nav>
 
       {/* Step Content Shell */}
       <div style={{ padding: '24px' }}>
@@ -860,7 +910,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() => setCurrentStep(2)}
+                    onClick={() => goToStep(2)}
                   >
                     Proceed to Blueprint <ArrowRight size={15} />
                   </button>
@@ -973,7 +1023,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
 
             {/* Source Aliases & Key Columns Table */}
             <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', marginBottom: 20 }}>
-              <table className="data-table" style={{ width: '100%', fontSize: '0.85rem' }}>
+              <table className="data-table dense" style={{ width: '100%', fontSize: '0.85rem' }}>
                 <thead>
                   <tr>
                     <th style={{ width: 140 }}>Role</th>
@@ -1063,10 +1113,10 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(1)}>
+              <button type="button" className="btn btn-secondary" onClick={() => goToStep(1)}>
                 <ChevronLeft size={16} /> Back to Ingestion
               </button>
-              <button type="button" className="btn btn-primary" onClick={() => setCurrentStep(3)}>
+              <button type="button" className="btn btn-primary" onClick={() => goToStep(3)}>
                 Proceed to Rules <ChevronRight size={16} />
               </button>
             </div>
@@ -1564,7 +1614,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             )}
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(2)}>
+              <button type="button" className="btn btn-secondary" onClick={() => goToStep(2)}>
                 <ChevronLeft size={16} /> Back to Blueprint
               </button>
               <button
@@ -1572,9 +1622,20 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 className="btn btn-primary"
                 onClick={() => void handleExecuteVerification()}
                 disabled={running}
+                aria-busy={running}
+                aria-live="polite"
               >
-                {running ? <span className="spinner" /> : <Play size={16} />}
-                Execute Reconciliation Run
+                {running ? (
+                  <>
+                    <span className="spinner" aria-hidden="true" />
+                    <span>Executing Reconciliation…</span>
+                  </>
+                ) : (
+                  <>
+                    <Play size={16} />
+                    <span>Execute Reconciliation Run</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -1595,7 +1656,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               <button
                 type="button"
                 className="btn btn-primary btn-sm"
-                onClick={() => setCurrentStep(5)}
+                onClick={() => goToStep(5)}
               >
                 Proceed to Sign-off <ArrowRight size={15} />
               </button>
@@ -2077,7 +2138,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
 
                 {/* Exception Grid Table */}
                 <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', marginBottom: 20 }}>
-                  <table className="data-table" style={{ width: '100%', fontSize: '0.85rem' }}>
+                  <table className="data-table dense" style={{ width: '100%', fontSize: '0.85rem' }}>
                     <thead>
                       <tr>
                         <th style={{ width: 40, textAlign: 'center' }}>
@@ -2097,7 +2158,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                         </th>
                         <th style={{ width: 140 }}>Key Values</th>
                         <th style={{ width: 130 }}>Match Status</th>
-                        <th style={{ width: 110 }}>Exposure ($)</th>
+                        <th style={{ width: 110, textAlign: 'right' }}>Exposure ($)</th>
                         <th>Source Lineage (Row # by Source)</th>
                         <th>Differences / Outcome</th>
                         <th style={{ width: 70, textAlign: 'center' }}>Inspect</th>
@@ -2106,8 +2167,14 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     <tbody>
                       {filteredResults.length === 0 ? (
                         <tr>
-                          <td colSpan={7} style={{ textAlign: 'center', padding: '36px' }}>
-                            No records match your filters.
+                          <td colSpan={7} style={{ textAlign: 'center', padding: '40px 20px' }}>
+                            <div className="empty-state" style={{ maxWidth: 420, margin: '0 auto' }}>
+                              <Search size={28} className="text-dim" style={{ marginBottom: 8 }} />
+                              <h4 style={{ margin: '0 0 6px 0', fontSize: '0.95rem' }}>No records match your filters</h4>
+                              <p className="text-dim" style={{ margin: 0, fontSize: '0.82rem' }}>
+                                Try clearing search keywords, loosening financial monetary ranges, or switching category filters.
+                              </p>
+                            </div>
                           </td>
                         </tr>
                       ) : (
@@ -2164,7 +2231,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                                   )}
                                 </div>
                               </td>
-                              <td>
+                              <td className="cell-num">
                                 <span
                                   style={{
                                     fontFamily: 'var(--font-mono)',
@@ -2250,10 +2317,10 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             )}
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(3)}>
+              <button type="button" className="btn btn-secondary" onClick={() => goToStep(3)}>
                 <ChevronLeft size={16} /> Back to Rules
               </button>
-              <button type="button" className="btn btn-primary" onClick={() => setCurrentStep(5)}>
+              <button type="button" className="btn btn-primary" onClick={() => goToStep(5)}>
                 Proceed to Sign-off <ChevronRight size={16} />
               </button>
             </div>
@@ -2679,14 +2746,14 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             )}
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(4)}>
+              <button type="button" className="btn btn-secondary" onClick={() => goToStep(4)}>
                 <ChevronLeft size={16} /> Back to Exception Grid
               </button>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  setCurrentStep(1);
+                  goToStep(1);
                   setSignOffDetails(null);
                   setProposalNote('');
                   setApprovalNote('');

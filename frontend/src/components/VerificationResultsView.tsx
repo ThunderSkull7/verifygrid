@@ -828,7 +828,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
 
             {/* Data Table */}
             <div className="table-container">
-              <table className="data-table" style={{ width: '100%' }}>
+              <table className="data-table dense" style={{ width: '100%' }}>
                 <thead>
                   <tr>
                     <th style={{ width: 36, textAlign: 'center' }}>
@@ -849,8 +849,8 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                     <th style={{ width: '17%' }}>Key Columns</th>
                     <th style={{ width: '12%' }}>Match Status</th>
                     <th style={{ width: '12%' }}>Resolution</th>
-                    <th style={{ width: '13%' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <th style={{ width: '13%', textAlign: 'right' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4 }}>
                         <span>Exposure</span>
                         <ArrowDownUp size={12} className="text-dim" />
                       </div>
@@ -941,7 +941,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                               {resStatus}
                             </span>
                           </td>
-                          <td>
+                          <td className="cell-num">
                             <span
                               style={{
                                 fontFamily: 'var(--font-mono)',

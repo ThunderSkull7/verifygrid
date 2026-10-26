@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DiscrepancyItemResponse,
   FieldComparisonDiff,
@@ -6,6 +6,7 @@ import type {
   VerificationResultItem,
 } from '../types';
 import { api } from '../services/api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 import { StatusBadge } from './StatusBadge';
 import {
   AlertCircle,
@@ -39,17 +40,10 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [expandedDiff, setExpandedDiff] = useState<boolean>(false);
   const [apiInspectionData, setApiInspectionData] = useState<SideBySideInspectionResponse | null>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
 
-  // Close on Escape key
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  // Focus trapping and Escape key management
+  useFocusTrap(isOpen, onClose, drawerRef);
 
   // If record already has side_by_side structure populated, derive it directly
   const embeddedInspectionData = useMemo<SideBySideInspectionResponse | null>(() => {
@@ -161,9 +155,14 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
       onClick={onClose}
     >
       <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Record Inspector Side-by-Side Details"
+        tabIndex={-1}
         className="record-inspector-drawer"
         style={{
-          width: expandedDiff ? '85vw' : '650px',
+          width: expandedDiff ? 'min(88vw, 1100px)' : 'min(640px, 100vw)',
           maxWidth: '100vw',
           height: '100vh',
           backgroundColor: 'var(--bg-card, #11141d)',
@@ -174,6 +173,7 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
           transition: 'width 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
           overflow: 'hidden',
           zIndex: 1001,
+          outline: 'none',
         }}
         onClick={(e) => e.stopPropagation()}
       >

@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import type { ExceptionCluster } from '../types';
 import { api } from '../services/api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 import {
   AlertCircle,
   AlertTriangle,
@@ -35,6 +36,10 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
   totalSelectedCount,
 }) => {
   const [activeTab, setActiveTab] = useState<'decision' | 'assignment'>('decision');
+  const modalRef = useRef<HTMLDivElement>(null);
+
+  // Focus trap and Escape key dismissal
+  useFocusTrap(isOpen, onClose, modalRef);
   const [decision, setDecision] = useState<'APPROVE' | 'REJECT' | 'FORCE_MATCH' | 'ESCALATE' | 'REOPEN'>('APPROVE');
   const [justification, setJustification] = useState<string>('');
   const [reviewerInput, setReviewerInput] = useState<string>('');
@@ -140,10 +145,15 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
       onClick={onClose}
     >
       <div
+        ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bulk-review-modal-title"
+        tabIndex={-1}
         className="card"
         style={{
           width: '100%',
-          maxWidth: 640,
+          maxWidth: 'min(640px, 94vw)',
           backgroundColor: 'var(--bg-card)',
           border: '1px solid var(--border-color)',
           borderRadius: 'var(--radius-lg)',
@@ -152,6 +162,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
           display: 'flex',
           flexDirection: 'column',
           maxHeight: '90vh',
+          outline: 'none',
         }}
         onClick={(e) => e.stopPropagation()}
       >
