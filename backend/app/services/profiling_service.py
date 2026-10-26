@@ -546,6 +546,13 @@ def resolve_quarantine_records(
     Persist resolution decisions ('EXCLUDE' vs 'ACCEPT_AS_VALID') for quarantined records.
     Updates the impact preview and returns updated counts.
     """
+    project = get_project_by_id(db, project_id, current_user=current_user)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
     source_file = db.query(SourceFile).filter(
         SourceFile.id == file_id,
         SourceFile.project_id == project_id,

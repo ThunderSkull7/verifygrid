@@ -5,8 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, verify_project_access
 from app.db.session import get_db
+from app.models.project import Project
 from app.models.user import User
 from app.schemas.audit import (
     AuditTrailResponse,
@@ -32,6 +33,7 @@ def get_run_audit_trail_endpoint(
     run_id: uuid.UUID,
     skip: int = Query(0, ge=0, description="Offset"),
     limit: int = Query(50, ge=1, le=200, description="Page limit"),
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AuditTrailResponse:
@@ -55,6 +57,7 @@ def get_run_audit_trail_endpoint(
 def verify_run_audit_chain_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AuditVerificationResponse:

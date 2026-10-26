@@ -7,8 +7,9 @@ import uuid
 from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, verify_project_access
 from app.db.session import get_db
+from app.models.project import Project
 from app.models.user import User
 from app.services.export_service import (
     export_audit_workbook,
@@ -31,6 +32,7 @@ def export_run_report_endpoint(
     format: str = Query("csv", description="Report format: 'csv', 'json', or 'xlsx'"),
     discrepancy_category: Optional[str] = Query(None, description="Optional category filter"),
     match_status: Optional[str] = Query(None, description="Optional match status filter"),
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -60,6 +62,7 @@ def export_run_report_endpoint(
 def export_audit_workbook_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -91,6 +94,7 @@ def export_golden_record_endpoint(
         "ONLY_VERIFIED_AND_APPROVED",
         description="Filter policy: 'ONLY_VERIFIED_AND_APPROVED' or 'ALL_WITH_STATUS_METADATA'",
     ),
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

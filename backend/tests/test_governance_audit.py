@@ -77,12 +77,12 @@ def viewer_user(db_session: Session) -> User:
 
 
 @pytest.fixture
-def sample_project_and_run(db_session: Session, default_user: User):
+def sample_project_and_run(db_session: Session):
     """Create a project and persistent verification run for governance tests."""
     project = Project(
         name="Governance Test Project",
         description="Testing Maker-Checker and Tamper-evident Audit",
-        owner_id=default_user.id,
+        owner_id=None,
     )
     db_session.add(project)
     db_session.flush()

@@ -5,8 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, verify_project_access
 from app.db.session import get_db
+from app.models.project import Project
 from app.models.user import User
 from app.schemas.governance import (
     ApproveSignOffRequest,
@@ -34,6 +35,7 @@ router = APIRouter(tags=["governance"])
 def get_run_sign_off_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
@@ -59,6 +61,7 @@ def propose_sign_off_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
     request: ProposeSignOffRequest,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
@@ -85,6 +88,7 @@ def approve_sign_off_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
     request: ApproveSignOffRequest,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
@@ -111,6 +115,7 @@ def reject_sign_off_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
     request: RejectSignOffRequest,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     x_user_role: Optional[str] = Header(None, alias="X-User-Role"),

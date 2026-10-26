@@ -7,8 +7,9 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, verify_project_access
 from app.db.session import get_db
+from app.models.project import Project
 from app.models.user import User
 from app.schemas.review import (
     AssignmentRequest,
@@ -42,6 +43,7 @@ router = APIRouter()
 def get_run_clusters_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ClusterListResponse:
@@ -72,6 +74,7 @@ def get_cluster_records_endpoint(
     limit: int = Query(50, ge=1, le=200),
     resolution_status: Optional[str] = Query(None),
     assigned_to: Optional[str] = Query(None),
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ClusterRecordsResponse:
@@ -107,6 +110,7 @@ def apply_bulk_review_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
     request: BulkReviewRequest,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> BulkReviewResponse:
@@ -141,6 +145,7 @@ def apply_single_review_endpoint(
     run_id: uuid.UUID,
     discrepancy_id: uuid.UUID,
     request: ReviewDecisionRequest,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ReviewDecisionItem:
@@ -173,6 +178,7 @@ def assign_discrepancies_endpoint(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
     request: AssignmentRequest,
+    _project: Project = Depends(verify_project_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AssignmentResponse:

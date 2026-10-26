@@ -38,9 +38,15 @@ def get_projects(db: Session, current_user: Optional[User] = None, skip: int = 0
 
 def get_project_by_id(db: Session, project_id, current_user: Optional[User] = None) -> Optional[Project]:
     """
-    Retrieve a single project by primary key ID and verify user ownership.
+    Retrieve a single project by primary key ID and verify user ownership/authorization.
     """
     stmt = select(Project).where(Project.id == project_id)
+    project = db.scalars(stmt).first()
+    if not project:
+        return None
     if current_user:
-        stmt = stmt.where(Project.owner_id == current_user.id)
-    return db.scalars(stmt).first()
+        is_owner = (project.owner_id is None) or (project.owner_id == current_user.id)
+        is_admin = str(getattr(current_user, "role", "")).upper() == "ADMIN"
+        if not (is_owner or is_admin):
+            return None
+    return project

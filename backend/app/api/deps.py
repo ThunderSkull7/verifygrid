@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.session import get_db
+from app.models.project import Project
 from app.models.user import User
 
 security_bearer = HTTPBearer(auto_error=False)
@@ -57,3 +58,24 @@ def get_current_user(
         )
 
     return user
+
+
+def verify_project_access(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Project:
+    """
+    Enforce tenant isolation by verifying that the project exists
+    and belongs to the authenticated user. Prevents IDOR vulnerabilities.
+    """
+    from app.services.project_service import get_project_by_id
+
+    project = get_project_by_id(db, project_id, current_user=current_user)
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+    return project
+

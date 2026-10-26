@@ -1,3 +1,8 @@
+import os
+
+# Permanently enforce isolated in-memory SQLite database before any app or settings imports
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+
 from typing import Generator
 import pytest
 from fastapi.testclient import TestClient
