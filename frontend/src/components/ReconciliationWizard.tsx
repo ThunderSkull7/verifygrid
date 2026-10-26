@@ -18,6 +18,7 @@ import type {
   VerificationResultItem,
   VersionedRuleConfig,
   WhereCondition,
+  SignOffDetailsResponse,
 } from '../types';
 import { api } from '../services/api';
 import { FileUploadSection } from './FileUploadSection';
@@ -25,6 +26,7 @@ import { ProfilingQuarantineDrawer } from './ProfilingQuarantineDrawer';
 import { StatusBadge } from './StatusBadge';
 import { RecordInspectorDrawer } from './RecordInspectorDrawer';
 import { BulkReviewModal } from './BulkReviewModal';
+import { CryptographicAuditViewer } from './CryptographicAuditViewer';
 import { computeLocalClusters } from '../utils/clustering';
 import {
   AlertCircle,
@@ -35,16 +37,19 @@ import {
   CheckSquare,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Download,
   Eye,
   FileCheck,
   FileSpreadsheet,
   Filter,
   Layers,
+  Lock,
   Play,
   Plus,
   RotateCcw,
   Search,
+  ShieldAlert,
   ShieldCheck,
   Sliders,
   Sparkles,
@@ -53,8 +58,22 @@ import {
   TableProperties,
   Trash2,
   UserCheck,
+  UserX,
   X,
 } from 'lucide-react';
+
+const formatDateTime = (value?: string | null): string => {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
 
 interface ReconciliationWizardProps {
   project: Project;
@@ -167,9 +186,17 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   const [clusters, setClusters] = useState<ExceptionCluster[]>([]);
   const [loadingClusters, setLoadingClusters] = useState<boolean>(false);
 
-  // --- Step 5: Sign-off ---
-  const [signOffNote, setSignOffNote] = useState<string>('');
-  const [isSignedOff, setIsSignedOff] = useState<boolean>(false);
+  // --- Step 5: Maker–Checker Sign-off Governance & Cryptographic Audit ---
+  const [signOffDetails, setSignOffDetails] = useState<SignOffDetailsResponse | null>(null);
+  const [loadingSignOff, setLoadingSignOff] = useState<boolean>(false);
+  const [signOffActionLoading, setSignOffActionLoading] = useState<boolean>(false);
+  const [signOffError, setSignOffError] = useState<string | null>(null);
+  const [signOffSuccessMsg, setSignOffSuccessMsg] = useState<string | null>(null);
+  const [proposalNote, setProposalNote] = useState<string>('');
+  const [approvalNote, setApprovalNote] = useState<string>('');
+  const [rejectionReason, setRejectionReason] = useState<string>('');
+  const [showRejectForm, setShowRejectForm] = useState<boolean>(false);
+  const [auditChainRefreshKey, setAuditChainRefreshKey] = useState<number>(0);
   const [exportingFormat, setExportingFormat] = useState<'csv' | 'xlsx' | 'json' | null>(null);
 
   // Helper to derive alias for a dataset
@@ -448,6 +475,95 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
       alert(`Export failed: ${err.message}`);
     } finally {
       setExportingFormat(null);
+    }
+  };
+
+  // Sign-off governance loader and actions
+  const loadSignOffDetails = useCallback(async (runId: string) => {
+    setLoadingSignOff(true);
+    setSignOffError(null);
+    try {
+      const details = await api.getSignOff(project.id, runId);
+      setSignOffDetails(details);
+      const note = details.sign_off_proposal_note || details.proposal_note;
+      if (note) {
+        setProposalNote(note);
+      }
+    } catch (err: any) {
+      setSignOffError(err.message || 'Failed to fetch sign-off governance details.');
+    } finally {
+      setLoadingSignOff(false);
+    }
+  }, [project.id]);
+
+  useEffect(() => {
+    if (currentStep === 5 && createdRun?.id) {
+      const timer = setTimeout(() => {
+        void loadSignOffDetails(createdRun.id);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [currentStep, createdRun?.id, loadSignOffDetails]);
+
+  const handleProposeSignOff = async () => {
+    if (!createdRun?.id) return;
+    setSignOffActionLoading(true);
+    setSignOffError(null);
+    setSignOffSuccessMsg(null);
+    try {
+      const res = await api.proposeSignOff(project.id, createdRun.id, {
+        note: proposalNote || undefined,
+      });
+      setSignOffDetails(res);
+      setAuditChainRefreshKey((k) => k + 1);
+      setSignOffSuccessMsg('Reconciliation sign-off proposed successfully. Awaiting independent Checker review.');
+    } catch (err: any) {
+      setSignOffError(err.message || 'Failed to submit proposal for sign-off.');
+    } finally {
+      setSignOffActionLoading(false);
+    }
+  };
+
+  const handleApproveSignOff = async () => {
+    if (!createdRun?.id) return;
+    setSignOffActionLoading(true);
+    setSignOffError(null);
+    setSignOffSuccessMsg(null);
+    try {
+      const res = await api.approveSignOff(project.id, createdRun.id, {
+        note: approvalNote || undefined,
+      });
+      setSignOffDetails(res);
+      setAuditChainRefreshKey((k) => k + 1);
+      setSignOffSuccessMsg('Reconciliation sign-off approved and countersigned. Cryptographic audit chain locked.');
+    } catch (err: any) {
+      setSignOffError(err.message || 'Failed to approve reconciliation sign-off.');
+    } finally {
+      setSignOffActionLoading(false);
+    }
+  };
+
+  const handleRejectSignOff = async () => {
+    if (!createdRun?.id) return;
+    if (!rejectionReason.trim()) {
+      setSignOffError('A mandatory rejection reason is required to reject a sign-off proposal.');
+      return;
+    }
+    setSignOffActionLoading(true);
+    setSignOffError(null);
+    setSignOffSuccessMsg(null);
+    try {
+      const res = await api.rejectSignOff(project.id, createdRun.id, {
+        note: rejectionReason.trim(),
+      });
+      setSignOffDetails(res);
+      setShowRejectForm(false);
+      setAuditChainRefreshKey((k) => k + 1);
+      setSignOffSuccessMsg('Proposal rejected. Status updated to REJECTED.');
+    } catch (err: any) {
+      setSignOffError(err.message || 'Failed to reject reconciliation proposal.');
+    } finally {
+      setSignOffActionLoading(false);
     }
   };
 
@@ -2155,35 +2271,315 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   </div>
                 </div>
 
-                {/* Sign-off Form */}
-                <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 16 }}>
-                  <label style={{ fontSize: '0.9rem', fontWeight: 600, display: 'block', marginBottom: 8 }}>
-                    Sign-off Notes / Auditor Attestation:
-                  </label>
-                  <textarea
-                    className="form-textarea"
-                    rows={3}
-                    placeholder="e.g. Reviewed multi-source exceptions between ERP, Bank, and Gateway. Approved differences within tolerance."
-                    value={signOffNote}
-                    onChange={(e) => setSignOffNote(e.target.value)}
-                    disabled={isSignedOff}
-                    style={{ width: '100%', marginBottom: 12, fontSize: '0.85rem' }}
-                  />
-                  {!isSignedOff ? (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => setIsSignedOff(true)}
-                    >
-                      <CheckCircle2 size={16} /> Sign-off &amp; Seal Reconciliation
-                    </button>
-                  ) : (
-                    <div className="alert alert-success" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                      <CheckCircle2 size={16} />
-                      <strong>Reconciliation signed-off and committed to audit record.</strong>
+                {/* Sign-off Notifications */}
+                {signOffError && (
+                  <div className="alert alert-error" style={{ marginBottom: 14 }}>
+                    <AlertCircle size={16} />
+                    <span>{signOffError}</span>
+                  </div>
+                )}
+                {signOffSuccessMsg && (
+                  <div className="alert alert-success" style={{ marginBottom: 14 }}>
+                    <CheckCircle2 size={16} />
+                    <span>{signOffSuccessMsg}</span>
+                  </div>
+                )}
+
+                {/* Maker-Checker Sign-off Governance Panel */}
+                <div
+                  className="card"
+                  style={{
+                    borderTop: '1px solid var(--border-color)',
+                    backgroundColor: 'var(--bg-primary)',
+                    padding: '18px 20px',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border-color)',
+                    marginBottom: 20,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Lock size={18} className="text-primary" />
+                      <h4 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>
+                        Maker–Checker Governance Sign-off
+                      </h4>
                     </div>
-                  )}
+                    {/* Status Badge */}
+                    {(() => {
+                      const currentStatus = signOffDetails?.sign_off_status || signOffDetails?.status || 'DRAFT';
+                      if (currentStatus === 'APPROVED') {
+                        return (
+                          <span className="chip chip-success" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', fontSize: '0.8rem', fontWeight: 600 }}>
+                            <ShieldCheck size={13} /> APPROVED &amp; SEALED
+                          </span>
+                        );
+                      }
+                      if (currentStatus === 'AWAITING_SIGN_OFF') {
+                        return (
+                          <span className="chip chip-warning" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', fontSize: '0.8rem', fontWeight: 600 }}>
+                            <Clock size={13} /> AWAITING CHECKER APPROVAL
+                          </span>
+                        );
+                      }
+                      if (currentStatus === 'REJECTED') {
+                        return (
+                          <span className="chip chip-danger" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', fontSize: '0.8rem', fontWeight: 600 }}>
+                            <ShieldAlert size={13} /> REJECTED
+                          </span>
+                        );
+                      }
+                      return (
+                        <span className="chip" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 10px', fontSize: '0.8rem', fontWeight: 500 }}>
+                          DRAFT / UNPROPOSED
+                        </span>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Metadata display if proposed */}
+                  {(() => {
+                    const currentStatus = signOffDetails?.sign_off_status || signOffDetails?.status || 'DRAFT';
+                    const makerName = signOffDetails?.sign_off_proposed_by_name || signOffDetails?.proposed_by_name || 'Maker';
+                    const proposedDate = signOffDetails?.sign_off_proposed_at || signOffDetails?.proposed_at;
+                    const propNote = signOffDetails?.sign_off_proposal_note || signOffDetails?.proposal_note;
+                    const approverName = signOffDetails?.sign_off_approved_by_name || signOffDetails?.approved_by_name || 'Checker';
+                    const decisionDate = signOffDetails?.sign_off_decided_at || signOffDetails?.decided_at;
+                    const decNote = signOffDetails?.sign_off_decision_note || signOffDetails?.decision_note;
+                    const isMakerUser = Boolean(signOffDetails?.is_maker);
+
+                    return (
+                      <>
+                        {signOffDetails && currentStatus !== 'DRAFT' && (
+                          <div
+                            style={{
+                              backgroundColor: 'var(--bg-secondary)',
+                              padding: '12px 14px',
+                              borderRadius: 'var(--radius-sm)',
+                              fontSize: '0.84rem',
+                              marginBottom: 16,
+                              display: 'grid',
+                              gap: 8,
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span>
+                                <strong>Proposed by (Maker):</strong> {makerName}
+                              </span>
+                              <span className="text-dim">
+                                {formatDateTime(proposedDate)}
+                              </span>
+                            </div>
+                            {propNote && (
+                              <div>
+                                <strong>Proposal Scope / Attestation:</strong>{' '}
+                                <span style={{ fontStyle: 'italic' }}>{propNote}</span>
+                              </div>
+                            )}
+
+                            {currentStatus === 'APPROVED' && (
+                              <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 8, marginTop: 4 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                  <span className="text-success">
+                                    <strong>Countersigned by (Checker):</strong> {approverName}
+                                  </span>
+                                  <span className="text-dim">
+                                    {formatDateTime(decisionDate)}
+                                  </span>
+                                </div>
+                                {decNote && (
+                                  <div style={{ marginTop: 4 }}>
+                                    <strong>Approval Attestation:</strong>{' '}
+                                    <span style={{ fontStyle: 'italic' }}>{decNote}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {currentStatus === 'REJECTED' && (
+                              <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 8, marginTop: 4 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                  <span className="text-danger">
+                                    <strong>Rejected by:</strong> {approverName}
+                                  </span>
+                                  <span className="text-dim">
+                                    {formatDateTime(decisionDate)}
+                                  </span>
+                                </div>
+                                {decNote && (
+                                  <div style={{ marginTop: 4 }}>
+                                    <strong>Rejection Justification:</strong>{' '}
+                                    <span style={{ color: 'var(--danger)', fontWeight: 500 }}>{decNote}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Separation of Duties Warning if logged-in user is the Maker */}
+                        {currentStatus === 'AWAITING_SIGN_OFF' && isMakerUser && (
+                          <div
+                            className="alert alert-warning"
+                            style={{
+                              display: 'flex',
+                              alignItems: 'flex-start',
+                              gap: 10,
+                              marginBottom: 16,
+                            }}
+                          >
+                            <ShieldAlert size={18} style={{ flexShrink: 0, marginTop: 2 }} />
+                            <div style={{ fontSize: '0.85rem' }}>
+                              <strong>Separation of Duties Enforced:</strong> You submitted this sign-off proposal as Maker. To guarantee regulatory audit integrity, you cannot countersign or approve your own proposal. An authorized Checker or Administrator must countersign.
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Maker Action: Propose Sign-off (Active when DRAFT or REJECTED) */}
+                        {(!signOffDetails || currentStatus === 'DRAFT' || currentStatus === 'REJECTED') && (
+                          <div>
+                            <label style={{ fontSize: '0.86rem', fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                              Maker Sign-off Notes &amp; Scope Justification:
+                            </label>
+                            <textarea
+                              className="form-textarea"
+                              rows={3}
+                              placeholder="e.g. Reviewed multi-source exceptions between ERP, Bank, and Gateway. Verified numeric tolerances and grouped discrepancy signatures."
+                              value={proposalNote}
+                              onChange={(e) => setProposalNote(e.target.value)}
+                              disabled={signOffActionLoading}
+                              style={{ width: '100%', marginBottom: 12, fontSize: '0.85rem' }}
+                            />
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              onClick={() => void handleProposeSignOff()}
+                              disabled={signOffActionLoading || loadingSignOff}
+                            >
+                              {signOffActionLoading ? <span className="spinner" aria-hidden="true" /> : <UserCheck size={16} />}
+                              {currentStatus === 'REJECTED' ? 'Resubmit for Checker Sign-off' : 'Submit for Checker Sign-off'}
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Checker Actions: Countersign / Reject (Active when AWAITING_SIGN_OFF) */}
+                        {currentStatus === 'AWAITING_SIGN_OFF' && (
+                          <div>
+                            {!isMakerUser ? (
+                              <div>
+                                <label style={{ fontSize: '0.86rem', fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                                  Checker Countersignature Notes (Optional):
+                                </label>
+                                <textarea
+                                  className="form-textarea"
+                                  rows={2}
+                                  placeholder="e.g. Independent verification completed. Checked financial materiality exposure and verified clusters."
+                                  value={approvalNote}
+                                  onChange={(e) => setApprovalNote(e.target.value)}
+                                  disabled={signOffActionLoading}
+                                  style={{ width: '100%', marginBottom: 12, fontSize: '0.85rem' }}
+                                />
+                                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                  <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    onClick={() => void handleApproveSignOff()}
+                                    disabled={signOffActionLoading}
+                                  >
+                                    {signOffActionLoading ? <span className="spinner" aria-hidden="true" /> : <CheckCircle2 size={16} />}
+                                    Countersign &amp; Approve
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={() => setShowRejectForm(!showRejectForm)}
+                                    disabled={signOffActionLoading}
+                                  >
+                                    <UserX size={15} /> Reject Proposal…
+                                  </button>
+                                </div>
+
+                                {/* Rejection Form Drawer/Section */}
+                                {showRejectForm && (
+                                  <div
+                                    style={{
+                                      marginTop: 14,
+                                      padding: 14,
+                                      backgroundColor: 'var(--bg-secondary)',
+                                      border: '1px solid var(--border-color)',
+                                      borderRadius: 'var(--radius-sm)',
+                                    }}
+                                  >
+                                    <label style={{ fontSize: '0.85rem', fontWeight: 600, display: 'block', marginBottom: 6, color: 'var(--danger)' }}>
+                                      Mandatory Rejection Justification:
+                                    </label>
+                                    <textarea
+                                      className="form-textarea"
+                                      rows={2}
+                                      placeholder="Explain why the sign-off proposal is rejected and what corrections are required..."
+                                      value={rejectionReason}
+                                      onChange={(e) => setRejectionReason(e.target.value)}
+                                      disabled={signOffActionLoading}
+                                      style={{ width: '100%', marginBottom: 10, fontSize: '0.85rem' }}
+                                    />
+                                    <div style={{ display: 'flex', gap: 8 }}>
+                                      <button
+                                        type="button"
+                                        className="btn btn-danger btn-sm"
+                                        onClick={() => void handleRejectSignOff()}
+                                        disabled={signOffActionLoading || !rejectionReason.trim()}
+                                      >
+                                        {signOffActionLoading ? <span className="spinner" aria-hidden="true" /> : <ShieldAlert size={14} />}
+                                        Confirm Rejection
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost btn-sm"
+                                        onClick={() => setShowRejectForm(false)}
+                                        disabled={signOffActionLoading}
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  disabled
+                                  title="Makers cannot approve their own sign-off proposals"
+                                >
+                                  <CheckCircle2 size={16} /> Countersign &amp; Approve (Disabled for Maker)
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Certified Status Confirmation */}
+                        {currentStatus === 'APPROVED' && (
+                          <div className="alert alert-success" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                            <CheckCircle2 size={18} />
+                            <strong>Reconciliation signed-off and sealed. Immutable audit event committed to chain.</strong>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
+
+                {/* Cryptographic Audit Trail & Chain Verification */}
+                {createdRun && (
+                  <div style={{ marginTop: 24 }}>
+                    <CryptographicAuditViewer
+                      key={auditChainRefreshKey}
+                      projectId={project.id}
+                      runId={createdRun.id}
+                    />
+                  </div>
+                )}
               </div>
             )}
 
@@ -2196,7 +2592,12 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 className="btn btn-secondary"
                 onClick={() => {
                   setCurrentStep(1);
-                  setIsSignedOff(false);
+                  setSignOffDetails(null);
+                  setProposalNote('');
+                  setApprovalNote('');
+                  setRejectionReason('');
+                  setSignOffError(null);
+                  setSignOffSuccessMsg(null);
                 }}
               >
                 <RotateCcw size={15} /> Start New Reconciliation

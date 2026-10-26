@@ -536,6 +536,17 @@ class VerificationRunResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Maker-Checker Governance & Sign-off Lifecycle
+    sign_off_status: Optional[str] = "DRAFT"
+    sign_off_proposed_by: Optional[uuid.UUID] = None
+    sign_off_proposed_by_name: Optional[str] = None
+    sign_off_proposal_note: Optional[str] = None
+    sign_off_proposed_at: Optional[datetime] = None
+    sign_off_approved_by: Optional[uuid.UUID] = None
+    sign_off_approved_by_name: Optional[str] = None
+    sign_off_decision_note: Optional[str] = None
+    sign_off_decided_at: Optional[datetime] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 

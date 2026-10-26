@@ -37,6 +37,12 @@ import type {
   ClusterRecordsResponse,
   ReviewDecisionItem,
   ReviewDecisionRequest,
+  ApproveSignOffRequest,
+  AuditTrailResponse,
+  AuditVerificationResponse,
+  ProposeSignOffRequest,
+  RejectSignOffRequest,
+  SignOffDetailsResponse,
 } from '../types';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
@@ -518,6 +524,80 @@ class ApiClient {
     a.click();
     window.URL.revokeObjectURL(downloadUrl);
     a.remove();
+  }
+
+  // --- Maker-Checker Governance Endpoints ---
+  async getSignOff(projectId: string, runId: string): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off`
+    );
+  }
+
+  async proposeSignOff(
+    projectId: string,
+    runId: string,
+    payload: ProposeSignOffRequest
+  ): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off/propose`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async approveSignOff(
+    projectId: string,
+    runId: string,
+    payload: ApproveSignOffRequest = {}
+  ): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async rejectSignOff(
+    projectId: string,
+    runId: string,
+    payload: RejectSignOffRequest
+  ): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  // --- Append-Only Cryptographic Audit Trail Endpoints ---
+  async getAuditTrail(
+    projectId: string,
+    runId: string,
+    skip: number = 0,
+    limit: number = 50
+  ): Promise<AuditTrailResponse> {
+    const params = new URLSearchParams({
+      skip: String(skip),
+      limit: String(limit),
+    });
+    return this.request<AuditTrailResponse>(
+      `/projects/${projectId}/runs/${runId}/audit-trail?${params.toString()}`
+    );
+  }
+
+  async verifyAuditChain(
+    projectId: string,
+    runId: string
+  ): Promise<AuditVerificationResponse> {
+    return this.request<AuditVerificationResponse>(
+      `/projects/${projectId}/runs/${runId}/audit-trail/verify`
+    );
   }
 }
 

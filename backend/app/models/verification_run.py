@@ -95,6 +95,48 @@ class VerificationRun(Base):
         nullable=False,
     )
 
+    # Maker-Checker Governance & Sign-off Lifecycle
+    sign_off_status: Mapped[str] = mapped_column(
+        String(50),
+        default="DRAFT",
+        nullable=False,
+        index=True,
+    )
+    sign_off_proposed_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    sign_off_proposed_by_name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    sign_off_proposal_note: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    sign_off_proposed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    sign_off_approved_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    sign_off_approved_by_name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    sign_off_decision_note: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    sign_off_decided_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # Relationships
     project: Mapped["Project"] = relationship(
         "Project",

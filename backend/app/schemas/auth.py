@@ -17,6 +17,7 @@ class UserRegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", description="User email address")
     password: str = Field(min_length=8, max_length=128, description="Plaintext password (min 8 chars)")
     full_name: Optional[str] = Field(default=None, max_length=255, description="User full display name")
+    role: Optional[str] = Field(default="MAKER", description="User role (MAKER, CHECKER, ADMIN, VIEWER)")
 
 
 class UserLoginRequest(BaseModel):
@@ -32,6 +33,7 @@ class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     full_name: Optional[str] = None
+    role: str = "MAKER"
     created_at: datetime
     updated_at: datetime
 

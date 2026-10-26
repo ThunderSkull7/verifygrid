@@ -15,9 +15,12 @@ import {
   AlertCircle,
   Clock,
   Inbox,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import { StatusBadge } from './StatusBadge';
 import { VerificationResultsView } from './VerificationResultsView';
+import { CryptographicAuditViewer } from './CryptographicAuditViewer';
 
 interface AuditHistoryViewProps {
   project: Project;
@@ -270,6 +273,7 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
                   <th>Run</th>
                   <th>Created</th>
                   <th>Status</th>
+                  <th>Sign-off</th>
                   <th>Key columns</th>
                   <th>Records compared</th>
                   <th>Discrepancies</th>
@@ -280,6 +284,7 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
                 {runs.map((run) => {
                   const summary = run.summary;
                   const isSelected = selectedRun?.id === run.id;
+                  const signOff = run.sign_off_status || 'DRAFT';
                   return (
                     <tr key={run.id}>
                       <td>
@@ -292,6 +297,25 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
                       </td>
                       <td>
                         <StatusBadge status={run.status} />
+                      </td>
+                      <td>
+                        {signOff === 'APPROVED' ? (
+                          <span className="chip chip-success" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '0.74rem', fontWeight: 600 }}>
+                            <ShieldCheck size={11} /> Approved
+                          </span>
+                        ) : signOff === 'AWAITING_SIGN_OFF' ? (
+                          <span className="chip chip-warning" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '0.74rem', fontWeight: 600 }}>
+                            <Clock size={11} /> Awaiting Sign-off
+                          </span>
+                        ) : signOff === 'REJECTED' ? (
+                          <span className="chip chip-danger" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: '0.74rem', fontWeight: 600 }}>
+                            <ShieldAlert size={11} /> Rejected
+                          </span>
+                        ) : (
+                          <span className="chip" style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                            Draft
+                          </span>
+                        )}
                       </td>
                       <td>
                         <div className="chip-list">
@@ -403,6 +427,12 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
                 response={detailResponse}
                 run={selectedRun}
               />
+              <div style={{ marginTop: 24 }}>
+                <CryptographicAuditViewer
+                  projectId={project.id}
+                  runId={selectedRun.id}
+                />
+              </div>
             </>
           )}
         </div>

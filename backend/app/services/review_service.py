@@ -25,6 +25,8 @@ from app.schemas.review import (
     ReviewDecisionItem,
     ReviewDecisionRequest,
 )
+from app.schemas.audit import AuditEventType
+from app.services.audit_service import log_audit_event
 
 # Standard decision status transitions
 DECISION_TO_STATUS = {
@@ -119,6 +121,26 @@ def apply_single_review(
     disc.resolution_note = request.justification.strip()
     disc.resolved_by = reviewer_email or reviewer_id
     disc.resolved_at = now_utc
+
+    log_audit_event(
+        db=db,
+        project_id=project_id,
+        run_id=run_id,
+        event_type=AuditEventType.EXCEPTION_REVIEW_PROPOSED.value,
+        event_payload={
+            "action": "SINGLE_REVIEW",
+            "discrepancy_id": str(disc.id),
+            "decision": decision,
+            "justification": request.justification.strip(),
+            "previous_status": prev_status,
+            "new_status": new_status,
+            "cluster_id": disc.cluster_id,
+        },
+        user_id=getattr(current_user, "id", None),
+        user_email=reviewer_email,
+        user_role=getattr(current_user, "role", "MAKER") if current_user else "MAKER",
+        timestamp_utc=now_utc,
+    )
 
     db.commit()
     db.refresh(audit_entry)
@@ -252,6 +274,26 @@ def apply_bulk_review(
         disc.resolved_by = reviewer_email or reviewer_id
         disc.resolved_at = now_utc
         succeeded_ids.append(disc_id_str)
+
+    if succeeded_ids:
+        log_audit_event(
+            db=db,
+            project_id=project_id,
+            run_id=run_id,
+            event_type=AuditEventType.EXCEPTION_REVIEW_PROPOSED.value,
+            event_payload={
+                "action": "BULK_REVIEW",
+                "decision": decision,
+                "justification": request.justification.strip(),
+                "succeeded_count": len(succeeded_ids),
+                "ineligible_count": len(failed_records),
+                "cluster_id": request.cluster_id,
+            },
+            user_id=getattr(current_user, "id", None),
+            user_email=reviewer_email,
+            user_role=getattr(current_user, "role", "MAKER") if current_user else "MAKER",
+            timestamp_utc=now_utc,
+        )
 
     db.commit()
 

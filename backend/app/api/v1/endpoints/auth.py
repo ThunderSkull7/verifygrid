@@ -38,6 +38,7 @@ def register(
         email=normalized_email,
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name.strip() if payload.full_name else None,
+        role=payload.role.strip().upper() if payload.role else "MAKER",
     )
     db.add(user)
     db.commit()

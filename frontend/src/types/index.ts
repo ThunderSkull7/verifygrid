@@ -6,6 +6,7 @@ export interface User {
   id: string;
   email: string;
   full_name?: string | null;
+  role?: string;
   created_at: string;
   updated_at: string;
 }
@@ -244,6 +245,15 @@ export interface VerificationRun {
   completed_at?: string | null;
   created_at: string;
   updated_at: string;
+  sign_off_status?: string | null;
+  sign_off_proposed_by?: string | null;
+  sign_off_proposed_by_name?: string | null;
+  sign_off_proposal_note?: string | null;
+  sign_off_proposed_at?: string | null;
+  sign_off_approved_by?: string | null;
+  sign_off_approved_by_name?: string | null;
+  sign_off_decision_note?: string | null;
+  sign_off_decided_at?: string | null;
 }
 
 export interface VerificationRunListResponse {
@@ -758,6 +768,100 @@ export interface AssignmentResponse {
   discrepancy_ids: string[];
   message: string;
 }
+
+// --- Batch 7: Maker–Checker Governance & Tamper-Evident Audit Types ---
+
+export type UserRole = 'MAKER' | 'CHECKER' | 'ADMIN' | 'VIEWER';
+export type SignOffStatus = 'DRAFT' | 'AWAITING_SIGN_OFF' | 'APPROVED' | 'REJECTED';
+
+export interface ProposeSignOffRequest {
+  note?: string;
+  proposed_by_name?: string;
+  proposal_note?: string;
+}
+
+export interface ApproveSignOffRequest {
+  note?: string;
+  approved_by_name?: string;
+  approval_note?: string;
+}
+
+export interface RejectSignOffRequest {
+  note?: string;
+  rejection_reason?: string;
+}
+
+export interface SignOffDetailsResponse {
+  run_id: string;
+  project_id: string;
+  sign_off_status: SignOffStatus | string;
+  status?: SignOffStatus | string;
+  sign_off_proposed_by?: string | null;
+  proposed_by?: string | null;
+  sign_off_proposed_by_name?: string | null;
+  proposed_by_name?: string | null;
+  sign_off_proposal_note?: string | null;
+  proposal_note?: string | null;
+  sign_off_proposed_at?: string | null;
+  proposed_at?: string | null;
+  sign_off_approved_by?: string | null;
+  approved_by?: string | null;
+  sign_off_approved_by_name?: string | null;
+  approved_by_name?: string | null;
+  sign_off_decision_note?: string | null;
+  decision_note?: string | null;
+  sign_off_decided_at?: string | null;
+  decided_at?: string | null;
+  can_approve: boolean;
+  can_propose?: boolean;
+  can_reject?: boolean;
+  is_maker: boolean;
+  effective_role?: string;
+}
+
+export interface AuditEventResponse {
+  id: string;
+  event_id: string;
+  sequence_number: number;
+  run_id?: string | null;
+  project_id: string;
+  user_id?: string | null;
+  user_email?: string | null;
+  user_role: string;
+  event_type: string;
+  timestamp_utc: string;
+  timestamp_str: string;
+  event_payload: Record<string, any>;
+  previous_event_hash: string;
+  current_event_hash: string;
+}
+
+export interface AuditTrailResponse {
+  total: number;
+  items: AuditEventResponse[];
+  is_chain_valid: boolean;
+  head_hash?: string | null;
+  genesis_hash: string;
+}
+
+export interface AuditVerificationBrokenLink {
+  sequence_number: number;
+  event_id: string;
+  reason: string;
+  expected_hash: string;
+  actual_hash: string;
+}
+
+export interface AuditVerificationResponse {
+  status: 'VALID' | 'TAMPERED';
+  is_valid: boolean;
+  total_events: number;
+  head_hash?: string | null;
+  genesis_hash: string;
+  broken_link?: AuditVerificationBrokenLink | null;
+  message: string;
+}
+
 
 
 
