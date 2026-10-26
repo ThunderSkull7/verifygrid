@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -225,6 +226,36 @@ class VerificationDiscrepancy(Base):
         default="unresolved",
         index=True,
     )
+    resolution_note: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    resolved_by: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    cluster_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+    cluster_name: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    assigned_to: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+    assigned_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     side_by_side: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSON,
         nullable=True,
@@ -254,6 +285,12 @@ class VerificationDiscrepancy(Base):
     run: Mapped["VerificationRun"] = relationship(
         "VerificationRun",
         back_populates="discrepancies",
+    )
+    review_decisions: Mapped[List["DiscrepancyReviewDecision"]] = relationship(
+        "DiscrepancyReviewDecision",
+        back_populates="discrepancy",
+        cascade="all, delete-orphan",
+        order_by="DiscrepancyReviewDecision.created_at.desc()",
     )
 
     @property
@@ -310,3 +347,75 @@ class VerificationDiscrepancy(Base):
     @confidence_score.setter
     def confidence_score(self, val: Optional[float]) -> None:
         self._confidence_score = val
+
+
+class DiscrepancyReviewDecision(Base):
+    __tablename__ = "discrepancy_review_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    discrepancy_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("verification_discrepancies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("verification_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    decision: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )  # APPROVE, REJECT, FORCE_MATCH, ESCALATE, REOPEN
+    justification: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+    reviewer_id: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+    reviewer_email: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    previous_status: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+    new_status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+    is_bulk_action: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    cluster_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    discrepancy: Mapped["VerificationDiscrepancy"] = relationship(
+        "VerificationDiscrepancy",
+        back_populates="review_decisions",
+    )
+    run: Mapped["VerificationRun"] = relationship(
+        "VerificationRun",
+    )
+

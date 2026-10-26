@@ -118,6 +118,7 @@ export interface FieldDifference {
   target_type?: string | null;
   difference_type: string;
   reason_code?: string | null;
+  rule_id?: string | null;
   confidence_score?: number | null;
   message?: string | null;
 }
@@ -154,6 +155,13 @@ export interface VerificationResultItem {
   currency?: string | null;
   severity?: string | null;
   resolution_status?: string | null;
+  resolution_note?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  cluster_id?: string | null;
+  cluster_name?: string | null;
+  assigned_to?: string | null;
+  assigned_at?: string | null;
   side_by_side?: Record<string, any> | null;
   field_differences?: FieldDifference[];
   message?: string | null;
@@ -273,6 +281,13 @@ export interface DiscrepancyItemResponse {
   currency?: string | null;
   severity?: string | null;
   resolution_status?: string | null;
+  resolution_note?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  cluster_id?: string | null;
+  cluster_name?: string | null;
+  assigned_to?: string | null;
+  assigned_at?: string | null;
   side_by_side?: Record<string, any> | null;
   reason_code?: string | null;
   confidence_score?: number | null;
@@ -651,5 +666,98 @@ export interface RulePreviewResponse {
     }>;
   }>;
 }
+
+// --- Batch 6: Exception Clustering, Signatures & Bulk Human Review Types ---
+
+export interface ExceptionCluster {
+  cluster_id: string;
+  cluster_name: string;
+  reason_code: string;
+  rule_id?: string | null;
+  failed_field_names: string[];
+  source_alias?: string | null;
+  discrepancy_category: string;
+  severity: string;
+  total_records: number;
+  total_exposure: number;
+  currency: string;
+  root_cause_explanation: string;
+  status_counts: Record<string, number>;
+  sample_record?: Record<string, any> | null;
+  discrepancy_ids?: string[] | null;
+  assigned_to?: string | null;
+}
+
+export interface ClusterListResponse {
+  total_clusters: number;
+  total_exceptions: number;
+  total_cluster_exposure: number;
+  clusters: ExceptionCluster[];
+}
+
+export interface ClusterRecordsResponse {
+  cluster_id: string;
+  cluster_name: string;
+  total: number;
+  items: DiscrepancyItemResponse[];
+  skip: number;
+  limit: number;
+}
+
+export interface ReviewDecisionRequest {
+  decision: string;
+  justification: string;
+  reviewer_id?: string;
+  reviewer_email?: string;
+}
+
+export interface ReviewDecisionItem {
+  id: string;
+  discrepancy_id: string;
+  run_id: string;
+  decision: string;
+  justification: string;
+  reviewer_id?: string | null;
+  reviewer_email?: string | null;
+  previous_status?: string | null;
+  new_status: string;
+  is_bulk_action: boolean;
+  cluster_id?: string | null;
+  created_at: string;
+}
+
+export interface BulkReviewRequest {
+  decision: string;
+  justification: string;
+  cluster_id?: string;
+  discrepancy_ids?: string[];
+  max_exposure_threshold?: number;
+  allow_blocking_override?: boolean;
+}
+
+export interface BulkReviewResponse {
+  total_requested: number;
+  succeeded_count: number;
+  failed_count: number;
+  ineligible_count: number;
+  succeeded_ids: string[];
+  failed_records: Array<{ id: string; reason: string }>;
+  message: string;
+}
+
+export interface AssignmentRequest {
+  reviewer_id: string;
+  reviewer_email?: string;
+  cluster_id?: string;
+  discrepancy_ids?: string[];
+}
+
+export interface AssignmentResponse {
+  assigned_count: number;
+  reviewer_id: string;
+  discrepancy_ids: string[];
+  message: string;
+}
+
 
 

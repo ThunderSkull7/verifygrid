@@ -42,6 +42,11 @@ from app.schemas.multisource import (
     MultiSourceVerificationResponse,
     SourceDefinition,
 )
+from app.services.clustering_service import (
+    compute_exception_signature,
+    generate_cluster_id,
+    generate_cluster_name,
+)
 from app.services.preprocessing import extract_dataset_records
 from app.services.project_service import get_project_by_id
 from app.utils.normalization import (
@@ -1644,6 +1649,9 @@ def create_and_execute_verification_run(
 
             # Bulk save discrepancies (never store full dataset rows, only discrepancies)
             for item in discrepancies:
+                sig = compute_exception_signature(item)
+                cid = generate_cluster_id(sig)
+                cname = generate_cluster_name(sig, item)
                 disc = VerificationDiscrepancy(
                     run_id=run.id,
                     match_status=item.match_status.value,
@@ -1665,6 +1673,8 @@ def create_and_execute_verification_run(
                     currency=item.currency or "USD",
                     severity=item.severity or "medium",
                     resolution_status=item.resolution_status or "unresolved",
+                    cluster_id=cid,
+                    cluster_name=cname,
                     side_by_side=item.side_by_side,
                     _reason_code=item.reason_code.value if hasattr(item.reason_code, "value") else (str(item.reason_code) if item.reason_code else None),
                     _confidence_score=item.confidence_score,
@@ -1756,6 +1766,8 @@ def list_run_discrepancies(
     source_alias: Optional[str] = None,
     rule_failure_type: Optional[str] = None,
     resolution_status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    cluster_id: Optional[str] = None,
     sort_by: str = "source_row_number",
     sort_order: str = "asc",
 ) -> Tuple[int, List[VerificationDiscrepancy]]:
@@ -1781,6 +1793,8 @@ def list_run_discrepancies(
         "severity": VerificationDiscrepancy.severity,
         "resolution_status": VerificationDiscrepancy.resolution_status,
         "reason_code": VerificationDiscrepancy._reason_code,
+        "cluster_id": VerificationDiscrepancy.cluster_id,
+        "assigned_to": VerificationDiscrepancy.assigned_to,
     }
     clean_sort_by = sort_by.strip()
     if clean_sort_by not in valid_sort_fields:
@@ -1823,6 +1837,21 @@ def list_run_discrepancies(
                 cast(VerificationDiscrepancy.source_records, String).like(f'%"{source_alias}"%'),
             )
         )
+    if cluster_id:
+        query = query.filter(VerificationDiscrepancy.cluster_id == cluster_id)
+    if assigned_to:
+        if assigned_to.upper() == "ASSIGNED_TO_ME":
+            user_id = str(current_user.id) if (current_user and hasattr(current_user, "id")) else None
+            user_email = current_user.email if (current_user and hasattr(current_user, "email")) else None
+            user_match = [u for u in [user_id, user_email] if u]
+            if user_match:
+                query = query.filter(VerificationDiscrepancy.assigned_to.in_(user_match))
+            else:
+                query = query.filter(VerificationDiscrepancy.assigned_to.is_not(None))
+        elif assigned_to.upper() == "UNASSIGNED":
+            query = query.filter(VerificationDiscrepancy.assigned_to.is_(None))
+        else:
+            query = query.filter(VerificationDiscrepancy.assigned_to == assigned_to)
 
     total = query.count()
 
@@ -2558,6 +2587,9 @@ def create_and_execute_multisource_run(
             run.completed_at = datetime.now(timezone.utc)
 
             for item in discrepancies:
+                sig = compute_exception_signature(item)
+                cid = generate_cluster_id(sig)
+                cname = generate_cluster_name(sig, item)
                 disc = VerificationDiscrepancy(
                     run_id=run.id,
                     match_status=item.match_status.value,
@@ -2579,6 +2611,8 @@ def create_and_execute_multisource_run(
                     currency=item.currency or "USD",
                     severity=item.severity or "medium",
                     resolution_status=item.resolution_status or "unresolved",
+                    cluster_id=cid,
+                    cluster_name=cname,
                     side_by_side=item.side_by_side,
                     _reason_code=item.reason_code.value if hasattr(item.reason_code, "value") else (str(item.reason_code) if item.reason_code else None),
                     _confidence_score=item.confidence_score,

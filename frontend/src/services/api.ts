@@ -29,6 +29,14 @@ import type {
   VerificationRun,
   VerificationRunListResponse,
   SideBySideInspectionResponse,
+  AssignmentRequest,
+  AssignmentResponse,
+  BulkReviewRequest,
+  BulkReviewResponse,
+  ClusterListResponse,
+  ClusterRecordsResponse,
+  ReviewDecisionItem,
+  ReviewDecisionRequest,
 } from '../types';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
@@ -338,6 +346,8 @@ class ApiClient {
       source_alias?: string;
       rule_failure_type?: string;
       resolution_status?: string;
+      assigned_to?: string;
+      cluster_id?: string;
       sort_by?: string;
       sort_order?: 'asc' | 'desc';
     } = {}
@@ -353,6 +363,8 @@ class ApiClient {
     if (options.source_alias) params.set('source_alias', options.source_alias);
     if (options.rule_failure_type) params.set('rule_failure_type', options.rule_failure_type);
     if (options.resolution_status) params.set('resolution_status', options.resolution_status);
+    if (options.assigned_to) params.set('assigned_to', options.assigned_to);
+    if (options.cluster_id) params.set('cluster_id', options.cluster_id);
     if (options.sort_by) params.set('sort_by', options.sort_by);
     if (options.sort_order) params.set('sort_order', options.sort_order);
 
@@ -368,6 +380,82 @@ class ApiClient {
   ): Promise<SideBySideInspectionResponse> {
     return this.request<SideBySideInspectionResponse>(
       `/projects/${projectId}/runs/${runId}/results/${discrepancyId}/inspect`
+    );
+  }
+
+  // --- Batch 6: Exception Clustering & Human Review Endpoints ---
+
+  async getClusters(
+    projectId: string,
+    runId: string
+  ): Promise<ClusterListResponse> {
+    return this.request<ClusterListResponse>(
+      `/projects/${projectId}/runs/${runId}/clusters`
+    );
+  }
+
+  async getClusterRecords(
+    projectId: string,
+    runId: string,
+    clusterId: string,
+    options: {
+      skip?: number;
+      limit?: number;
+      resolution_status?: string;
+      assigned_to?: string;
+    } = {}
+  ): Promise<ClusterRecordsResponse> {
+    const params = new URLSearchParams();
+    if (options.skip !== undefined) params.set('skip', String(options.skip));
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.resolution_status) params.set('resolution_status', options.resolution_status);
+    if (options.assigned_to) params.set('assigned_to', options.assigned_to);
+
+    return this.request<ClusterRecordsResponse>(
+      `/projects/${projectId}/runs/${runId}/clusters/${clusterId}/records?${params.toString()}`
+    );
+  }
+
+  async applyBulkReview(
+    projectId: string,
+    runId: string,
+    req: BulkReviewRequest
+  ): Promise<BulkReviewResponse> {
+    return this.request<BulkReviewResponse>(
+      `/projects/${projectId}/runs/${runId}/reviews/bulk`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }
+    );
+  }
+
+  async applySingleReview(
+    projectId: string,
+    runId: string,
+    discrepancyId: string,
+    req: ReviewDecisionRequest
+  ): Promise<ReviewDecisionItem> {
+    return this.request<ReviewDecisionItem>(
+      `/projects/${projectId}/runs/${runId}/reviews/${discrepancyId}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }
+    );
+  }
+
+  async assignReviewer(
+    projectId: string,
+    runId: string,
+    req: AssignmentRequest
+  ): Promise<AssignmentResponse> {
+    return this.request<AssignmentResponse>(
+      `/projects/${projectId}/runs/${runId}/assignments`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }
     );
   }
 

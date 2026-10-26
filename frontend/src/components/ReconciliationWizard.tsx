@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   AggregationConfig,
   DateWindowRule,
+  ExceptionCluster,
   FieldDifference,
   MultiSourceKeyRecommendation,
   MultiSourceVerificationRequest,
@@ -23,12 +24,15 @@ import { FileUploadSection } from './FileUploadSection';
 import { ProfilingQuarantineDrawer } from './ProfilingQuarantineDrawer';
 import { StatusBadge } from './StatusBadge';
 import { RecordInspectorDrawer } from './RecordInspectorDrawer';
+import { BulkReviewModal } from './BulkReviewModal';
+import { computeLocalClusters } from '../utils/clustering';
 import {
   AlertCircle,
   ArrowRight,
   Calendar,
   Check,
   CheckCircle2,
+  CheckSquare,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -45,8 +49,10 @@ import {
   Sliders,
   Sparkles,
   Split,
+  Square,
   TableProperties,
   Trash2,
+  UserCheck,
   X,
 } from 'lucide-react';
 
@@ -137,15 +143,29 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     useState<MultiSourceVerificationResponse | null>(null);
   const [createdRun, setCreatedRun] = useState<VerificationRun | null>(null);
 
+  // View Mode: Record Grid vs Exception Clusters
+  const [wizardViewMode, setWizardViewMode] = useState<'records' | 'clusters'>('records');
+
   // Filters for Exception Grid
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [clusterFilter, setClusterFilter] = useState<string>('all');
+  const [assignmentFilter, setAssignmentFilter] = useState<string>('all');
   const [searchKey, setSearchKey] = useState<string>('');
   const [wizardSortOption, setWizardSortOption] = useState<string>('exposure_desc');
   const [wizardMinAmount, setWizardMinAmount] = useState<string>('');
   const [wizardMaxAmount, setWizardMaxAmount] = useState<string>('');
   const [selectedRecordForInspection, setSelectedRecordForInspection] =
     useState<VerificationResultItem | null>(null);
+
+  // Row selection and bulk review modal
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
+  const [bulkModalCluster, setBulkModalCluster] = useState<ExceptionCluster | null>(null);
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState<boolean>(false);
+
+  // Clusters state
+  const [clusters, setClusters] = useState<ExceptionCluster[]>([]);
+  const [loadingClusters, setLoadingClusters] = useState<boolean>(false);
 
   // --- Step 5: Sign-off ---
   const [signOffNote, setSignOffNote] = useState<string>('');
@@ -431,6 +451,38 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     }
   };
 
+  const createdRunId = createdRun?.id;
+  const loadWizardClusters = useCallback(() => {
+    if (!createdRunId) {
+      if (verificationResponse?.results) {
+        setClusters(computeLocalClusters(verificationResponse.results));
+      }
+      return;
+    }
+    setLoadingClusters(true);
+    api.getClusters(project.id, createdRunId)
+      .then((res) => {
+        setClusters(res.clusters);
+      })
+      .catch(() => {
+        if (verificationResponse?.results) {
+          setClusters(computeLocalClusters(verificationResponse.results));
+        }
+      })
+      .finally(() => {
+        setLoadingClusters(false);
+      });
+  }, [project.id, createdRunId, verificationResponse]);
+
+  useEffect(() => {
+    if (currentStep === 4) {
+      const timer = setTimeout(() => {
+        loadWizardClusters();
+      }, 0);
+      return () => clearTimeout(timer);
+    }
+  }, [currentStep, loadWizardClusters]);
+
   // Filtered and sorted results in Exception Grid
   const filteredResults: VerificationResultItem[] = useMemo(() => {
     const minAmt = wizardMinAmount.trim() !== '' ? parseFloat(wizardMinAmount) : null;
@@ -439,6 +491,12 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     const items: VerificationResultItem[] = (verificationResponse?.results || []).filter((item: VerificationResultItem) => {
       if (categoryFilter !== 'all' && item.discrepancy_category !== categoryFilter) return false;
       if (statusFilter !== 'all' && item.match_status !== statusFilter) return false;
+      if (clusterFilter !== 'all') {
+        const itemCid = item.cluster_id || `c_${item.reason_code || (item.field_differences?.[0]?.reason_code) || item.match_status || 'FIELD_MISMATCH'}_${item.discrepancy_category || 'field_mismatch'}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        if (item.cluster_id !== clusterFilter && itemCid !== clusterFilter) return false;
+      }
+      if (assignmentFilter === 'assigned_to_me' && !item.assigned_to) return false;
+      if (assignmentFilter === 'unassigned' && item.assigned_to) return false;
       if (searchKey.trim()) {
         const kStr = JSON.stringify(item.key_values).toLowerCase();
         if (!kStr.includes(searchKey.toLowerCase())) return false;
@@ -469,11 +527,56 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     verificationResponse?.results,
     categoryFilter,
     statusFilter,
+    clusterFilter,
+    assignmentFilter,
     searchKey,
     wizardMinAmount,
     wizardMaxAmount,
     wizardSortOption,
   ]);
+
+  const handleToggleRow = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedRowIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleToggleAllVisible = () => {
+    if (selectedRowIds.size === filteredResults.length && filteredResults.length > 0) {
+      setSelectedRowIds(new Set());
+    } else {
+      setSelectedRowIds(new Set(filteredResults.map((r) => r.id)));
+    }
+  };
+
+  const selectedRowsExposure = useMemo(() => {
+    let sum = 0;
+    (verificationResponse?.results || []).forEach((r) => {
+      if (selectedRowIds.has(r.id)) {
+        sum += r.exposure_amount ?? 0;
+      }
+    });
+    return Math.round(sum * 100) / 100;
+  }, [verificationResponse?.results, selectedRowIds]);
+
+  const openBulkModalForSelected = () => {
+    setBulkModalCluster(null);
+    setIsBulkModalOpen(true);
+  };
+
+  const openBulkModalForCluster = (cl: ExceptionCluster) => {
+    setBulkModalCluster(cl);
+    setIsBulkModalOpen(true);
+  };
+
+  const handleClusterViewRecords = (clusterId: string) => {
+    setClusterFilter(clusterId);
+    setWizardViewMode('records');
+  };
 
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -1441,228 +1544,510 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               </div>
             )}
 
-            {/* Filters & Amount Sorting Toolbar */}
-            <div className="toolbar" style={{ marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
-              <div className="search-box" style={{ minWidth: 200 }}>
-                <Search size={15} />
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Search by key values…"
-                  value={searchKey}
-                  onChange={(e) => setSearchKey(e.target.value)}
-                />
-              </div>
-
-              {/* Amount Range Filter */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>Min $:</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="10"
-                  className="form-input"
-                  style={{ width: 80, padding: '4px 8px' }}
-                  placeholder="Min"
-                  value={wizardMinAmount}
-                  onChange={(e) => setWizardMinAmount(e.target.value)}
-                  aria-label="Filter by minimum amount"
-                />
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>Max:</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="10"
-                  className="form-input"
-                  style={{ width: 80, padding: '4px 8px' }}
-                  placeholder="Max"
-                  value={wizardMaxAmount}
-                  onChange={(e) => setWizardMaxAmount(e.target.value)}
-                  aria-label="Filter by maximum amount"
-                />
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <Filter size={15} className="text-dim" />
-                <select
-                  className="form-select filter-select"
-                  value={categoryFilter}
-                  onChange={(e) => setCategoryFilter(e.target.value)}
-                >
-                  <option value="all">All categories</option>
-                  <option value="none">Identical</option>
-                  <option value="field_mismatch">Field mismatches</option>
-                  <option value="missing_record">Missing records</option>
-                  <option value="duplicate_key">Duplicate keys</option>
-                  <option value="aggregation_mismatch">Aggregation mismatches</option>
-                  <option value="rule_violation">Rule violations</option>
-                </select>
-
-                <select
-                  className="form-select filter-select"
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value)}
-                >
-                  <option value="all">All statuses</option>
-                  <option value="identical">Identical</option>
-                  <option value="field_mismatch">Field mismatch</option>
-                  <option value="missing_in_target">Missing in target</option>
-                  <option value="missing_in_source">Missing in primary</option>
-                  <option value="partial_payment">Partial payment</option>
-                  <option value="overpayment">Overpayment</option>
-                  <option value="unmatched_split_record">Orphan split record</option>
-                  <option value="duplicate_receipt">Duplicate receipt</option>
-                </select>
-
-                <select
-                  className="form-select filter-select"
-                  value={wizardSortOption}
-                  onChange={(e) => setWizardSortOption(e.target.value)}
-                  aria-label="Sort by financial exposure"
-                >
-                  <option value="exposure_desc">Exposure: High → Low</option>
-                  <option value="exposure_asc">Exposure: Low → High</option>
-                  <option value="variance_desc">Net Variance: High → Low</option>
-                  <option value="variance_asc">Net Variance: Low → High</option>
-                  <option value="row_asc">Lineage Row Index</option>
-                </select>
-
-                {(categoryFilter !== 'all' || statusFilter !== 'all' || searchKey || wizardMinAmount || wizardMaxAmount) && (
+            {/* View Mode Toggle & Actions Header */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 12,
+                marginBottom: 16,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', backgroundColor: 'var(--bg-card-hover)', borderRadius: 'var(--radius-sm)', padding: 3 }}>
                   <button
                     type="button"
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => {
-                      setCategoryFilter('all');
-                      setStatusFilter('all');
-                      setSearchKey('');
-                      setWizardMinAmount('');
-                      setWizardMaxAmount('');
+                    className="btn btn-sm"
+                    style={{
+                      backgroundColor: wizardViewMode === 'records' ? 'var(--bg-card)' : 'transparent',
+                      color: wizardViewMode === 'records' ? 'var(--text-main)' : 'var(--text-dim)',
+                      boxShadow: wizardViewMode === 'records' ? '0 1px 3px rgba(0,0,0,0.2)' : 'none',
+                      fontWeight: wizardViewMode === 'records' ? 600 : 400,
                     }}
+                    onClick={() => setWizardViewMode('records')}
                   >
-                    <X size={14} /> Clear
+                    <TableProperties size={14} /> Record Grid ({filteredResults.length})
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    style={{
+                      backgroundColor: wizardViewMode === 'clusters' ? 'var(--bg-card)' : 'transparent',
+                      color: wizardViewMode === 'clusters' ? 'var(--text-main)' : 'var(--text-dim)',
+                      boxShadow: wizardViewMode === 'clusters' ? '0 1px 3px rgba(0,0,0,0.2)' : 'none',
+                      fontWeight: wizardViewMode === 'clusters' ? 600 : 400,
+                    }}
+                    onClick={() => setWizardViewMode('clusters')}
+                  >
+                    <Layers size={14} /> Exception Clusters ({clusters.length})
+                  </button>
+                </div>
+
+                {selectedRowIds.size > 0 && wizardViewMode === 'records' && (
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={openBulkModalForSelected}
+                  >
+                    <CheckSquare size={14} /> Bulk Review Selected ({selectedRowIds.size}) &mdash; ${selectedRowsExposure.toLocaleString()}
                   </button>
                 )}
               </div>
+
+              <span className="card-description" style={{ fontSize: '0.82rem' }}>
+                {wizardViewMode === 'records'
+                  ? `${filteredResults.length.toLocaleString()} matching records`
+                  : `${clusters.length} root-cause exception clusters`}
+              </span>
             </div>
 
-            {/* Exception Grid Table */}
-            <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', marginBottom: 20 }}>
-              <table className="data-table" style={{ width: '100%', fontSize: '0.85rem' }}>
-                <thead>
-                  <tr>
-                    <th style={{ width: 140 }}>Key Values</th>
-                    <th style={{ width: 120 }}>Match Status</th>
-                    <th style={{ width: 120 }}>Exposure ($)</th>
-                    <th>Source Lineage (Row # by Source)</th>
-                    <th>Differences / Outcome</th>
-                    <th style={{ width: 70, textAlign: 'center' }}>Inspect</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredResults.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '36px' }}>
-                        No records match your filters.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredResults.slice(0, 100).map((row: VerificationResultItem) => {
-                      const exp = row.exposure_amount ?? 0;
+            {/* CLUSTER VIEW */}
+            {wizardViewMode === 'clusters' ? (
+              <div>
+                {loadingClusters ? (
+                  <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-dim)' }}>
+                    <span className="spinner" /> Loading exception clusters...
+                  </div>
+                ) : clusters.length === 0 ? (
+                  <div className="empty-state" style={{ padding: '48px 20px' }}>
+                    <CheckCircle2 size={32} className="text-success" />
+                    <h3 className="empty-title">Zero Exception Clusters</h3>
+                    <p className="empty-text">No recurring exception signatures or discrepancies detected in this dataset.</p>
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16, marginBottom: 20 }}>
+                    {clusters.map((cl) => {
+                      const isHigh = cl.total_exposure >= 1000;
+                      const isBlock = cl.severity.toUpperCase() === 'BLOCKING';
                       return (
-                        <tr
-                          key={row.id}
-                          style={{ cursor: 'pointer' }}
-                          onClick={() => setSelectedRecordForInspection(row)}
-                          className="hover-row"
+                        <div
+                          key={cl.cluster_id}
+                          className="card"
+                          style={{
+                            backgroundColor: 'var(--bg-card-hover)',
+                            border: isBlock
+                              ? '1px solid var(--danger-border, #f87171)'
+                              : isHigh
+                              ? '1px solid var(--warning-border, #f59e0b)'
+                              : '1px solid var(--border-color)',
+                            padding: 18,
+                            borderRadius: 'var(--radius-md)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            justifyContent: 'space-between',
+                          }}
                         >
-                          <td>
-                            <code className="key-code">{JSON.stringify(row.key_values)}</code>
-                          </td>
-                          <td>
-                            <StatusBadge status={row.match_status} />
-                          </td>
-                          <td>
-                            <span
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
+                              <span
+                                className={`badge ${isBlock ? 'badge-danger' : isHigh ? 'badge-warning' : 'badge-neutral'}`}
+                                style={{ fontSize: '0.7rem' }}
+                              >
+                                {cl.severity.toUpperCase()}
+                              </span>
+                              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                                {cl.cluster_id}
+                              </span>
+                            </div>
+
+                            <h4 style={{ margin: '0 0 6px', fontSize: '0.98rem', fontWeight: 600 }}>
+                              {cl.cluster_name}
+                            </h4>
+
+                            <p style={{ margin: '0 0 12px', fontSize: '0.8rem', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+                              {cl.root_cause_explanation}
+                            </p>
+
+                            <div
                               style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontWeight: exp > 0 ? 600 : 400,
-                                color: exp >= 1000 ? 'var(--danger-text)' : exp > 0 ? 'var(--warning-text)' : 'var(--text-dim)',
+                                display: 'grid',
+                                gridTemplateColumns: '1fr 1fr',
+                                gap: 10,
+                                padding: '10px 12px',
+                                backgroundColor: 'var(--bg-card)',
+                                borderRadius: 'var(--radius-sm)',
+                                marginBottom: 12,
                               }}
                             >
-                              ${exp.toFixed(2)}
-                            </span>
-                          </td>
-                          <td>
-                            {row.source_row_indices ? (
-                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                {Object.entries(row.source_row_indices).map(([alias, rIdx]) => (
+                              <div>
+                                <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Records</span>
+                                <div style={{ fontSize: '1.1rem', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                                  {cl.total_records.toLocaleString()}
+                                </div>
+                              </div>
+                              <div>
+                                <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Exposure</span>
+                                <div
+                                  style={{
+                                    fontSize: '1.1rem',
+                                    fontWeight: 700,
+                                    fontFamily: 'var(--font-mono)',
+                                    color: cl.total_exposure > 0 ? 'var(--warning-text)' : 'var(--text-main)',
+                                  }}
+                                >
+                                  ${cl.total_exposure.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.76rem', color: 'var(--text-dim)' }}>
+                                <UserCheck size={14} />
+                                <span>{cl.assigned_to ? cl.assigned_to : 'Unassigned'}</span>
+                              </div>
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                {Object.entries(cl.status_counts).map(([st, c]) => (
                                   <span
-                                    key={alias}
+                                    key={st}
                                     className="badge"
                                     style={{
-                                      backgroundColor: rIdx ? 'var(--bg-card-hover)' : 'var(--danger-soft)',
-                                      color: rIdx ? 'var(--text-main)' : 'var(--danger-text)',
-                                      fontFamily: 'var(--font-mono)',
-                                      fontSize: '0.72rem',
+                                      fontSize: '0.7rem',
+                                      backgroundColor: st === 'APPROVED' ? 'var(--success-soft)' : 'var(--bg-card)',
+                                      color: st === 'APPROVED' ? 'var(--success-text)' : 'var(--text-dim)',
                                     }}
                                   >
-                                    <strong>{alias}:</strong> {rIdx ? `Row ${rIdx}` : 'Missing'}
+                                    {st}: {c}
                                   </span>
                                 ))}
                               </div>
-                            ) : (
-                              <span className="text-dim">Row #{row.source_row_number ?? row.source_row_index ?? '—'}</span>
-                            )}
-                          </td>
-                          <td>
-                            {row.child_records && row.child_records.length > 0 && (
-                              <div style={{ marginBottom: 4 }}>
-                                <span className="badge badge-accent" style={{ fontSize: '0.72rem', marginRight: 6 }}>
-                                  {row.child_records.length} Installments
-                                </span>
-                                {row.aggregated_amount != null && row.expected_amount != null && (
-                                  <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-                                    Sum: <strong>${row.aggregated_amount.toFixed(2)}</strong> (Parent: ${row.expected_amount.toFixed(2)})
-                                  </span>
-                                )}
-                              </div>
-                            )}
-                            {row.field_differences && row.field_differences.length > 0 ? (
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                                {row.field_differences.slice(0, 2).map((d: FieldDifference, i: number) => (
-                                  <div key={i} style={{ fontSize: '0.75rem' }}>
-                                    <strong className="text-accent">{d.field_name}:</strong>{' '}
-                                    <span>{String(d.source_value)}</span> ≠{' '}
-                                    <span style={{ color: 'var(--warning-text)' }}>{String(d.target_value)}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <span className="text-dim">{row.message || 'Identical match'}</span>
-                            )}
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', gap: 8, borderTop: '1px solid var(--border-color)', paddingTop: 12 }}>
                             <button
                               type="button"
-                              className="btn btn-ghost btn-sm"
-                              style={{ padding: '3px 6px' }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedRecordForInspection(row);
-                              }}
-                              title="Inspect Side-by-Side Record"
-                              aria-label="Inspect Record"
+                              className="btn btn-primary btn-sm"
+                              style={{ flex: 1 }}
+                              onClick={() => openBulkModalForCluster(cl)}
                             >
-                              <Eye size={14} />
+                              <CheckCircle2 size={13} /> Bulk Review
                             </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => handleClusterViewRecords(cl.cluster_id)}
+                              title="Filter Grid to this Cluster"
+                            >
+                              <Eye size={13} /> View ({cl.total_records})
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* RECORD GRID VIEW */
+              <div>
+                {/* Filters & Amount Sorting Toolbar */}
+                <div className="toolbar" style={{ marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
+                  <div className="search-box" style={{ minWidth: 180 }}>
+                    <Search size={15} />
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Search by key values…"
+                      value={searchKey}
+                      onChange={(e) => setSearchKey(e.target.value)}
+                    />
+                  </div>
+
+                  {/* Amount Range Filter */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>Min $:</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="10"
+                      className="form-input"
+                      style={{ width: 80, padding: '4px 8px' }}
+                      placeholder="Min"
+                      value={wizardMinAmount}
+                      onChange={(e) => setWizardMinAmount(e.target.value)}
+                      aria-label="Filter by minimum amount"
+                    />
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>Max:</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="10"
+                      className="form-input"
+                      style={{ width: 80, padding: '4px 8px' }}
+                      placeholder="Max"
+                      value={wizardMaxAmount}
+                      onChange={(e) => setWizardMaxAmount(e.target.value)}
+                      aria-label="Filter by maximum amount"
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <Filter size={15} className="text-dim" />
+                    <select
+                      className="form-select filter-select"
+                      value={categoryFilter}
+                      onChange={(e) => setCategoryFilter(e.target.value)}
+                    >
+                      <option value="all">All categories</option>
+                      <option value="none">Identical</option>
+                      <option value="field_mismatch">Field mismatches</option>
+                      <option value="missing_record">Missing records</option>
+                      <option value="duplicate_key">Duplicate keys</option>
+                      <option value="aggregation_mismatch">Aggregation mismatches</option>
+                      <option value="rule_violation">Rule violations</option>
+                    </select>
+
+                    <select
+                      className="form-select filter-select"
+                      value={statusFilter}
+                      onChange={(e) => setStatusFilter(e.target.value)}
+                    >
+                      <option value="all">All statuses</option>
+                      <option value="identical">Identical</option>
+                      <option value="field_mismatch">Field mismatch</option>
+                      <option value="missing_in_target">Missing in target</option>
+                      <option value="missing_in_source">Missing in primary</option>
+                      <option value="partial_payment">Partial payment</option>
+                      <option value="overpayment">Overpayment</option>
+                      <option value="unmatched_split_record">Orphan split record</option>
+                      <option value="duplicate_receipt">Duplicate receipt</option>
+                    </select>
+
+                    {clusters.length > 0 && (
+                      <select
+                        className="form-select filter-select"
+                        value={clusterFilter}
+                        onChange={(e) => setClusterFilter(e.target.value)}
+                        aria-label="Filter by exception cluster"
+                      >
+                        <option value="all">All Clusters ({clusters.length})</option>
+                        {clusters.map((c) => (
+                          <option key={c.cluster_id} value={c.cluster_id}>
+                            {c.cluster_name} ({c.total_records})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    <select
+                      className="form-select filter-select"
+                      value={assignmentFilter}
+                      onChange={(e) => setAssignmentFilter(e.target.value)}
+                      aria-label="Filter by assignment"
+                    >
+                      <option value="all">All Assignments</option>
+                      <option value="assigned_to_me">Assigned</option>
+                      <option value="unassigned">Unassigned</option>
+                    </select>
+
+                    <select
+                      className="form-select filter-select"
+                      value={wizardSortOption}
+                      onChange={(e) => setWizardSortOption(e.target.value)}
+                      aria-label="Sort by financial exposure"
+                    >
+                      <option value="exposure_desc">Exposure: High → Low</option>
+                      <option value="exposure_asc">Exposure: Low → High</option>
+                      <option value="variance_desc">Net Variance: High → Low</option>
+                      <option value="variance_asc">Net Variance: Low → High</option>
+                      <option value="row_asc">Lineage Row Index</option>
+                    </select>
+
+                    {(categoryFilter !== 'all' || statusFilter !== 'all' || clusterFilter !== 'all' || assignmentFilter !== 'all' || searchKey || wizardMinAmount || wizardMaxAmount) && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => {
+                          setCategoryFilter('all');
+                          setStatusFilter('all');
+                          setClusterFilter('all');
+                          setAssignmentFilter('all');
+                          setSearchKey('');
+                          setWizardMinAmount('');
+                          setWizardMaxAmount('');
+                        }}
+                      >
+                        <X size={14} /> Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Exception Grid Table */}
+                <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', marginBottom: 20 }}>
+                  <table className="data-table" style={{ width: '100%', fontSize: '0.85rem' }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: 40, textAlign: 'center' }}>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            style={{ padding: 2 }}
+                            onClick={handleToggleAllVisible}
+                            aria-label="Select all"
+                          >
+                            {selectedRowIds.size === filteredResults.length && filteredResults.length > 0 ? (
+                              <CheckSquare size={16} className="text-accent" />
+                            ) : (
+                              <Square size={16} className="text-dim" />
+                            )}
+                          </button>
+                        </th>
+                        <th style={{ width: 140 }}>Key Values</th>
+                        <th style={{ width: 130 }}>Match Status</th>
+                        <th style={{ width: 110 }}>Exposure ($)</th>
+                        <th>Source Lineage (Row # by Source)</th>
+                        <th>Differences / Outcome</th>
+                        <th style={{ width: 70, textAlign: 'center' }}>Inspect</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredResults.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} style={{ textAlign: 'center', padding: '36px' }}>
+                            No records match your filters.
                           </td>
                         </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
+                      ) : (
+                        filteredResults.slice(0, 100).map((row: VerificationResultItem) => {
+                          const exp = row.exposure_amount ?? 0;
+                          const isSelected = selectedRowIds.has(row.id);
+                          return (
+                            <tr
+                              key={row.id}
+                              style={{
+                                cursor: 'pointer',
+                                backgroundColor: isSelected ? 'var(--accent-soft, rgba(99, 102, 241, 0.08))' : undefined,
+                              }}
+                              onClick={() => setSelectedRecordForInspection(row)}
+                              className="hover-row"
+                            >
+                              <td
+                                style={{ textAlign: 'center' }}
+                                onClick={(e) => handleToggleRow(row.id, e)}
+                              >
+                                {isSelected ? (
+                                  <CheckSquare size={16} className="text-accent" />
+                                ) : (
+                                  <Square size={16} className="text-dim" />
+                                )}
+                              </td>
+                              <td>
+                                <code className="key-code">{JSON.stringify(row.key_values)}</code>
+                              </td>
+                              <td>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+                                  <StatusBadge status={row.match_status} />
+                                  {row.resolution_status && row.resolution_status !== 'unresolved' && (
+                                    <span
+                                      className="badge"
+                                      style={{
+                                        fontSize: '0.68rem',
+                                        backgroundColor:
+                                          row.resolution_status === 'APPROVED' || row.resolution_status === 'FORCE_MATCHED'
+                                            ? 'var(--success-soft)'
+                                            : row.resolution_status === 'REJECTED'
+                                            ? 'var(--danger-soft)'
+                                            : 'var(--warning-soft)',
+                                        color:
+                                          row.resolution_status === 'APPROVED' || row.resolution_status === 'FORCE_MATCHED'
+                                            ? 'var(--success-text)'
+                                            : row.resolution_status === 'REJECTED'
+                                            ? 'var(--danger-text)'
+                                            : 'var(--warning-text)',
+                                      }}
+                                    >
+                                      {row.resolution_status}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td>
+                                <span
+                                  style={{
+                                    fontFamily: 'var(--font-mono)',
+                                    fontWeight: exp > 0 ? 600 : 400,
+                                    color: exp >= 1000 ? 'var(--danger-text)' : exp > 0 ? 'var(--warning-text)' : 'var(--text-dim)',
+                                  }}
+                                >
+                                  ${exp.toFixed(2)}
+                                </span>
+                              </td>
+                              <td>
+                                {row.source_row_indices ? (
+                                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                    {Object.entries(row.source_row_indices).map(([alias, rIdx]) => (
+                                      <span
+                                        key={alias}
+                                        className="badge"
+                                        style={{
+                                          backgroundColor: rIdx ? 'var(--bg-card-hover)' : 'var(--danger-soft)',
+                                          color: rIdx ? 'var(--text-main)' : 'var(--danger-text)',
+                                          fontFamily: 'var(--font-mono)',
+                                          fontSize: '0.72rem',
+                                        }}
+                                      >
+                                        <strong>{alias}:</strong> {rIdx ? `Row ${rIdx}` : 'Missing'}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-dim">Row #{row.source_row_number ?? row.source_row_index ?? '—'}</span>
+                                )}
+                              </td>
+                              <td>
+                                {row.child_records && row.child_records.length > 0 && (
+                                  <div style={{ marginBottom: 4 }}>
+                                    <span className="badge badge-accent" style={{ fontSize: '0.72rem', marginRight: 6 }}>
+                                      {row.child_records.length} Installments
+                                    </span>
+                                    {row.aggregated_amount != null && row.expected_amount != null && (
+                                      <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
+                                        Sum: <strong>${row.aggregated_amount.toFixed(2)}</strong> (Parent: ${row.expected_amount.toFixed(2)})
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                                {row.field_differences && row.field_differences.length > 0 ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                    {row.field_differences.slice(0, 2).map((d: FieldDifference, i: number) => (
+                                      <div key={i} style={{ fontSize: '0.75rem' }}>
+                                        <strong className="text-accent">{d.field_name}:</strong>{' '}
+                                        <span>{String(d.source_value)}</span> ≠{' '}
+                                        <span style={{ color: 'var(--warning-text)' }}>{String(d.target_value)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-dim">{row.message || 'Identical match'}</span>
+                                )}
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost btn-sm"
+                                  style={{ padding: '3px 6px' }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedRecordForInspection(row);
+                                  }}
+                                  title="Inspect Side-by-Side Record"
+                                  aria-label="Inspect Record"
+                                >
+                                  <Eye size={14} />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(3)}>
@@ -1840,6 +2225,24 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         projectId={project.id}
         runId={createdRun?.id}
       />
+
+      {/* Bulk Review & Assignment Modal */}
+      {isBulkModalOpen && createdRun && (
+        <BulkReviewModal
+          isOpen={isBulkModalOpen}
+          onClose={() => setIsBulkModalOpen(false)}
+          onSuccess={() => {
+            loadWizardClusters();
+            setSelectedRowIds(new Set());
+          }}
+          projectId={project.id}
+          runId={createdRun.id}
+          cluster={bulkModalCluster}
+          selectedRecordIds={Array.from(selectedRowIds)}
+          selectedExposure={selectedRowsExposure}
+          totalSelectedCount={selectedRowIds.size}
+        />
+      )}
     </div>
   );
 };

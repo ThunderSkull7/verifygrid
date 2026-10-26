@@ -199,6 +199,8 @@ def list_run_discrepancies_endpoint(
     source_alias: Optional[str] = Query(None, description="Multi-source participating alias"),
     rule_failure_type: Optional[str] = Query(None, description="Rule violation or failure type"),
     resolution_status: Optional[str] = Query(None, description="Resolution status ('resolved', 'unresolved')"),
+    assigned_to: Optional[str] = Query(None, description="Filter by assigned reviewer or 'ASSIGNED_TO_ME' or 'UNASSIGNED'"),
+    cluster_id: Optional[str] = Query(None, description="Filter by exception cluster ID"),
     sort_by: str = Query("source_row_number", description="Field to sort by"),
     sort_order: str = Query("asc", pattern="^(asc|desc)$", description="'asc' or 'desc'"),
     current_user: User = Depends(get_current_user),
@@ -220,6 +222,8 @@ def list_run_discrepancies_endpoint(
         source_alias=source_alias,
         rule_failure_type=rule_failure_type,
         resolution_status=resolution_status,
+        assigned_to=assigned_to,
+        cluster_id=cluster_id,
         sort_by=sort_by,
         sort_order=sort_order,
     )

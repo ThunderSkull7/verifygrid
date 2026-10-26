@@ -66,6 +66,9 @@ class ReasonCode(str, Enum):
     OVERPAYMENT = "OVERPAYMENT"
     UNMATCHED_SPLIT_RECORD = "UNMATCHED_SPLIT_RECORD"
     DUPLICATE_RECEIPT = "DUPLICATE_RECEIPT"
+    TRAILING_WHITESPACE = "TRAILING_WHITESPACE"
+    VALUE_MISMATCH = "VALUE_MISMATCH"
+    TAX_CODE_MISMATCH = "TAX_CODE_MISMATCH"
 
 
 class FieldDifference(BaseModel):
@@ -198,6 +201,34 @@ class VerificationResultItem(BaseModel):
     resolution_status: Optional[str] = Field(
         default="unresolved",
         description="Exception resolution workflow status",
+    )
+    resolution_note: Optional[str] = Field(
+        default=None,
+        description="Auditor / reviewer resolution note",
+    )
+    resolved_by: Optional[str] = Field(
+        default=None,
+        description="Identifier of user who resolved exception",
+    )
+    resolved_at: Optional[datetime] = Field(
+        default=None,
+        description="Timestamp when exception was resolved",
+    )
+    cluster_id: Optional[str] = Field(
+        default=None,
+        description="Deterministic exception signature / cluster identifier",
+    )
+    cluster_name: Optional[str] = Field(
+        default=None,
+        description="Human-readable exception cluster name",
+    )
+    assigned_to: Optional[str] = Field(
+        default=None,
+        description="Assigned reviewer user ID or email",
+    )
+    assigned_at: Optional[datetime] = Field(
+        default=None,
+        description="Timestamp when assigned",
     )
     side_by_side: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -550,6 +581,13 @@ class DiscrepancyItemResponse(BaseModel):
     currency: Optional[str] = "USD"
     severity: Optional[str] = "medium"
     resolution_status: Optional[str] = "unresolved"
+    resolution_note: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    cluster_id: Optional[str] = None
+    cluster_name: Optional[str] = None
+    assigned_to: Optional[str] = None
+    assigned_at: Optional[datetime] = None
     side_by_side: Optional[Dict[str, Any]] = None
     message: Optional[str] = None
     created_at: datetime
