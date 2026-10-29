@@ -1,16 +1,21 @@
+from __future__ import annotations
+
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import DateTime, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
+
+if TYPE_CHECKING:
+    from app.models.project import Project
 
 
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
+        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
     )
@@ -46,7 +51,6 @@ class User(Base):
         nullable=False,
     )
 
-    # Relationships
     projects: Mapped[List["Project"]] = relationship(
         "Project",
         back_populates="owner",

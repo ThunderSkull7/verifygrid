@@ -239,6 +239,14 @@ def list_run_discrepancies_endpoint(
 
 
 @router.get(
+    "/projects/{project_id}/runs/{run_id}/results/{discrepancy_id}/inspect",
+    response_model=SideBySideInspectionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get side-by-side record inspection and field-level diffs",
+    description="Retrieves raw vs. normalized side-by-side comparison, field mismatches, and rule failure details for a discrepancy.",
+    include_in_schema=False,
+)
+@router.get(
     "/projects/{project_id}/runs/{run_id}/results/{discrepancy_id}/inspection",
     response_model=SideBySideInspectionResponse,
     status_code=status.HTTP_200_OK,

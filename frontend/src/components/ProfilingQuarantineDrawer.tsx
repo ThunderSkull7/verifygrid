@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type {
   FileProfileSummary,
   QuarantineListResponse,
@@ -6,6 +6,7 @@ import type {
   ResolutionAction,
 } from '../types';
 import { api } from '../services/api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 import {
   AlertOctagon,
   AlertTriangle,
@@ -26,11 +27,8 @@ interface ProfilingQuarantineDrawerProps {
   projectId: string;
   fileId: string;
   filename: string;
-  isOpen: boolean;
-  /** Batch 9: worksheet the drawer is scoped to. Profile/quarantine data and
-   *  resolutions are fetched and saved for exactly this worksheet, so switching
-   *  worksheets can never reuse stale row-index resolutions. */
   worksheet?: string | null;
+  isOpen: boolean;
   onClose: () => void;
   onResolutionsUpdated?: () => void;
 }
@@ -39,12 +37,16 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
   projectId,
   fileId,
   filename,
-  isOpen,
   worksheet,
+  isOpen,
   onClose,
   onResolutionsUpdated,
 }) => {
   const [activeTab, setActiveTab] = useState<'profiling' | 'quarantine'>('profiling');
+  const drawerRef = useRef<HTMLDivElement>(null);
+
+  // Focus trap and Escape key dismissal
+  useFocusTrap(isOpen, onClose, drawerRef);
   const [profile, setProfile] = useState<FileProfileSummary | null>(null);
   const [quarantineData, setQuarantineData] = useState<QuarantineListResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -67,8 +69,8 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
       setSuccessMessage(null);
       try {
         const [prof, quar] = await Promise.all([
-          api.getFileProfile(projectId, fileId, worksheet),
-          api.getFileQuarantine(projectId, fileId, worksheet),
+          api.getFileProfile(projectId, fileId),
+          api.getFileQuarantine(projectId, fileId),
         ]);
         if (!cancelled) {
           setProfile(prof);
@@ -135,7 +137,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
     }));
 
     try {
-      const resp = await api.resolveQuarantine(projectId, fileId, { resolutions: items }, worksheet);
+      const resp = await api.resolveQuarantine(projectId, fileId, { resolutions: items });
       setQuarantineData((prev) =>
         prev
           ? {
@@ -185,10 +187,15 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
       }}
     >
       <div
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Pre-flight Profiling and Quarantine Drawer"
+        tabIndex={-1}
         className="drawer-panel"
         style={{
           width: '100%',
-          maxWidth: '920px',
+          maxWidth: 'min(920px, 100vw)',
           height: '100vh',
           backgroundColor: 'var(--bg-card)',
           boxShadow: 'var(--shadow-lg)',
@@ -197,6 +204,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
           borderLeft: '1px solid var(--border-color)',
           overflow: 'hidden',
           animation: 'slideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
+          outline: 'none',
         }}
       >
         {/* Header */}

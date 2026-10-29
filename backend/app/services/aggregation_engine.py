@@ -353,4 +353,9 @@ def reconcile_split_payments(
         status="completed",
     )
 
+    from app.services.materiality_engine import compute_record_materiality, compute_summary_materiality
+    for r in results:
+        compute_record_materiality(r)
+    summary = compute_summary_materiality(results, discrepancies, summary)
+
     return summary, results, discrepancies

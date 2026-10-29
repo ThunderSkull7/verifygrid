@@ -17,6 +17,7 @@ from app.api.v1.endpoints.audit import router as audit_router
 from app.api.v1.endpoints.governance import router as governance_router
 from app.api.v1.endpoints.review import router as review_router
 from app.api.v1.endpoints.users import router as users_router
+from app.api.v1.endpoints.recipes import router as recipes_router
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +71,8 @@ api_router.include_router(exports_router, tags=["Exports"])
 api_router.include_router(profiling_router, tags=["Profiling & Quarantine"])
 api_router.include_router(rules_router, tags=["Rules & Aggregation"])
 api_router.include_router(templates_router, prefix="/templates", tags=["Templates"])
-api_router.include_router(audit_router, tags=["Audit"])
-api_router.include_router(governance_router, tags=["Governance"])
-api_router.include_router(review_router, tags=["Review & Clustering"])
+api_router.include_router(review_router, tags=["Clustering & Review"])
+api_router.include_router(governance_router, tags=["Maker-Checker Governance"])
+api_router.include_router(audit_router, tags=["Audit Trail & Verification"])
 api_router.include_router(users_router, prefix="/users", tags=["Users"])
-
-
+api_router.include_router(recipes_router, tags=["Recipes (.verifygrid.json)"])

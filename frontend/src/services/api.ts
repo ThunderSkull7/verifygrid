@@ -22,15 +22,33 @@ import type {
   RuleValidateRequest,
   RuleValidateResponse,
   SourceFile,
-  TemplateApplyRequest,
-  TemplateApplyResponse,
-  TemplateConfigurationV1,
   TokenResponse,
   User,
   VerificationRequest,
   VerificationResponse,
   VerificationRun,
   VerificationRunListResponse,
+  SideBySideInspectionResponse,
+  AssignmentRequest,
+  AssignmentResponse,
+  BulkReviewRequest,
+  BulkReviewResponse,
+  ClusterListResponse,
+  ClusterRecordsResponse,
+  ReviewDecisionItem,
+  ReviewDecisionRequest,
+  ApproveSignOffRequest,
+  AuditTrailResponse,
+  AuditVerificationResponse,
+  ProposeSignOffRequest,
+  RejectSignOffRequest,
+  SignOffDetailsResponse,
+  RecipeApplyRequest,
+  RecipeApplyValidationResult,
+  VerificationRecipe,
+  TemplateApplyRequest,
+  TemplateApplyResponse,
+  TemplateConfigurationV1,
   VerificationTemplate,
 } from '../types';
 
@@ -91,10 +109,8 @@ class ApiClient {
 
     if (!response.ok) {
       let errorMessage = `HTTP ${response.status} ${response.statusText}`;
-      let errorDetail: unknown = null;
       try {
         const errorJson = await response.json();
-        errorDetail = errorJson?.detail ?? null;
         if (errorJson.detail) {
           if (typeof errorJson.detail === 'string') {
             errorMessage = errorJson.detail;
@@ -103,17 +119,12 @@ class ApiClient {
             errorMessage = errorJson.detail
               .map((d: any) => `${d.loc?.join('.')} : ${d.msg}`)
               .join(', ');
-          } else if (typeof errorJson.detail === 'object') {
-            // Structured backend detail (e.g. template apply validation report)
-            errorMessage = errorJson.detail.message || JSON.stringify(errorJson.detail);
           }
         }
       } catch {
         // Response was not JSON
       }
-      const err = new Error(errorMessage) as Error & { detail?: unknown };
-      err.detail = errorDetail;
-      throw err;
+      throw new Error(errorMessage);
     }
 
     // Check for empty body / 204
@@ -219,12 +230,10 @@ class ApiClient {
   async resolveQuarantine(
     projectId: string,
     fileId: string,
-    payload: QuarantineResolutionRequest,
-    worksheet?: string | null
+    payload: QuarantineResolutionRequest
   ): Promise<QuarantineResolutionResponse> {
-    const ws = worksheet ? `?worksheet=${encodeURIComponent(worksheet)}` : '';
     return this.request<QuarantineResolutionResponse>(
-      `/projects/${projectId}/files/${fileId}/quarantine/resolve${ws}`,
+      `/projects/${projectId}/files/${fileId}/quarantine/resolve`,
       {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -232,7 +241,7 @@ class ApiClient {
     );
   }
 
-  // --- Template Endpoints (Batch 11, personal-only) ---
+  // --- Verification Template Endpoints (Batch 11/13) ---
   async listTemplates(mode?: 'organization'): Promise<VerificationTemplate[]> {
     const q = mode ? `?mode=${encodeURIComponent(mode)}` : '';
     return this.request<VerificationTemplate[]>(`/templates${q}`);
@@ -395,6 +404,14 @@ class ApiClient {
       limit?: number;
       discrepancy_category?: string;
       match_status?: string;
+      min_amount?: number;
+      max_amount?: number;
+      reason_code?: string;
+      source_alias?: string;
+      rule_failure_type?: string;
+      resolution_status?: string;
+      assigned_to?: string;
+      cluster_id?: string;
       sort_by?: string;
       sort_order?: 'asc' | 'desc';
     } = {}
@@ -404,11 +421,105 @@ class ApiClient {
     if (options.limit !== undefined) params.set('limit', String(options.limit));
     if (options.discrepancy_category) params.set('discrepancy_category', options.discrepancy_category);
     if (options.match_status) params.set('match_status', options.match_status);
+    if (options.min_amount !== undefined) params.set('min_amount', String(options.min_amount));
+    if (options.max_amount !== undefined) params.set('max_amount', String(options.max_amount));
+    if (options.reason_code) params.set('reason_code', options.reason_code);
+    if (options.source_alias) params.set('source_alias', options.source_alias);
+    if (options.rule_failure_type) params.set('rule_failure_type', options.rule_failure_type);
+    if (options.resolution_status) params.set('resolution_status', options.resolution_status);
+    if (options.assigned_to) params.set('assigned_to', options.assigned_to);
+    if (options.cluster_id) params.set('cluster_id', options.cluster_id);
     if (options.sort_by) params.set('sort_by', options.sort_by);
     if (options.sort_order) params.set('sort_order', options.sort_order);
 
     return this.request<DiscrepancyListResponse>(
       `/projects/${projectId}/runs/${runId}/results?${params.toString()}`
+    );
+  }
+
+  async inspectDiscrepancy(
+    projectId: string,
+    runId: string,
+    discrepancyId: string
+  ): Promise<SideBySideInspectionResponse> {
+    return this.request<SideBySideInspectionResponse>(
+      `/projects/${projectId}/runs/${runId}/results/${discrepancyId}/inspect`
+    );
+  }
+
+  // --- Batch 6: Exception Clustering & Human Review Endpoints ---
+
+  async getClusters(
+    projectId: string,
+    runId: string
+  ): Promise<ClusterListResponse> {
+    return this.request<ClusterListResponse>(
+      `/projects/${projectId}/runs/${runId}/clusters`
+    );
+  }
+
+  async getClusterRecords(
+    projectId: string,
+    runId: string,
+    clusterId: string,
+    options: {
+      skip?: number;
+      limit?: number;
+      resolution_status?: string;
+      assigned_to?: string;
+    } = {}
+  ): Promise<ClusterRecordsResponse> {
+    const params = new URLSearchParams();
+    if (options.skip !== undefined) params.set('skip', String(options.skip));
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.resolution_status) params.set('resolution_status', options.resolution_status);
+    if (options.assigned_to) params.set('assigned_to', options.assigned_to);
+
+    return this.request<ClusterRecordsResponse>(
+      `/projects/${projectId}/runs/${runId}/clusters/${clusterId}/records?${params.toString()}`
+    );
+  }
+
+  async applyBulkReview(
+    projectId: string,
+    runId: string,
+    req: BulkReviewRequest
+  ): Promise<BulkReviewResponse> {
+    return this.request<BulkReviewResponse>(
+      `/projects/${projectId}/runs/${runId}/reviews/bulk`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }
+    );
+  }
+
+  async applySingleReview(
+    projectId: string,
+    runId: string,
+    discrepancyId: string,
+    req: ReviewDecisionRequest
+  ): Promise<ReviewDecisionItem> {
+    return this.request<ReviewDecisionItem>(
+      `/projects/${projectId}/runs/${runId}/reviews/${discrepancyId}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }
+    );
+  }
+
+  async assignReviewer(
+    projectId: string,
+    runId: string,
+    req: AssignmentRequest
+  ): Promise<AssignmentResponse> {
+    return this.request<AssignmentResponse>(
+      `/projects/${projectId}/runs/${runId}/assignments`,
+      {
+        method: 'POST',
+        body: JSON.stringify(req),
+      }
     );
   }
 
@@ -471,6 +582,186 @@ class ApiClient {
     a.click();
     window.URL.revokeObjectURL(downloadUrl);
     a.remove();
+  }
+
+  // --- Batch 8: Executive Audit Workbook & Golden Record Exports ---
+  async downloadAuditWorkbook(projectId: string, runId: string): Promise<void> {
+    const url = `${BASE_URL}/projects/${projectId}/runs/${runId}/audit-workbook/export`;
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(`Failed to download audit workbook: HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition');
+    let filename = `audit_workbook_${runId}.xlsx`;
+    if (disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      if (match && match[1]) {
+        filename = match[1];
+      }
+    }
+
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(downloadUrl);
+    a.remove();
+  }
+
+  async downloadGoldenRecord(
+    projectId: string,
+    runId: string,
+    format: 'csv' | 'json' | 'xlsx' = 'csv',
+    policy: string = 'ONLY_VERIFIED_AND_APPROVED'
+  ): Promise<void> {
+    const params = new URLSearchParams({
+      format,
+      policy,
+    });
+    const url = `${BASE_URL}/projects/${projectId}/runs/${runId}/golden-record/export?${params.toString()}`;
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(`Failed to download golden record: HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition');
+    let filename = `golden_record_${runId}.${format}`;
+    if (disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      if (match && match[1]) {
+        filename = match[1];
+      }
+    }
+
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(downloadUrl);
+    a.remove();
+  }
+
+  // --- Batch 8: Reusable Verification Recipes (.verifygrid.json) ---
+  async getRecipe(projectId: string, runId: string, download = false): Promise<VerificationRecipe> {
+    const recipe = await this.request<VerificationRecipe>(`/projects/${projectId}/runs/${runId}/recipe`);
+    if (download) {
+      const jsonStr = JSON.stringify(recipe, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const filename = `${recipe.recipe_name.toLowerCase().replace(/[^a-z0-9_-]/g, '_')}.verifygrid.json`;
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(downloadUrl);
+      a.remove();
+    }
+    return recipe;
+  }
+
+  async applyRecipe(
+    projectId: string,
+    payload: RecipeApplyRequest
+  ): Promise<RecipeApplyValidationResult> {
+    return this.request<RecipeApplyValidationResult>(
+      `/projects/${projectId}/recipes/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  // --- Maker-Checker Governance Endpoints ---
+  async getSignOff(projectId: string, runId: string): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off`
+    );
+  }
+
+  async proposeSignOff(
+    projectId: string,
+    runId: string,
+    payload: ProposeSignOffRequest
+  ): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off/propose`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async approveSignOff(
+    projectId: string,
+    runId: string,
+    payload: ApproveSignOffRequest = {}
+  ): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async rejectSignOff(
+    projectId: string,
+    runId: string,
+    payload: RejectSignOffRequest
+  ): Promise<SignOffDetailsResponse> {
+    return this.request<SignOffDetailsResponse>(
+      `/projects/${projectId}/runs/${runId}/sign-off/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  // --- Append-Only Cryptographic Audit Trail Endpoints ---
+  async getAuditTrail(
+    projectId: string,
+    runId: string,
+    skip: number = 0,
+    limit: number = 50
+  ): Promise<AuditTrailResponse> {
+    const params = new URLSearchParams({
+      skip: String(skip),
+      limit: String(limit),
+    });
+    return this.request<AuditTrailResponse>(
+      `/projects/${projectId}/runs/${runId}/audit-trail?${params.toString()}`
+    );
+  }
+
+  async verifyAuditChain(
+    projectId: string,
+    runId: string
+  ): Promise<AuditVerificationResponse> {
+    return this.request<AuditVerificationResponse>(
+      `/projects/${projectId}/runs/${runId}/audit-trail/verify`
+    );
   }
 }
 

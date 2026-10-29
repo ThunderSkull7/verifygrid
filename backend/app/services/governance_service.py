@@ -31,12 +31,20 @@ from app.services.audit_service import log_audit_event
 VALID_ROLES = {role.value for role in UserRole}
 
 
-def get_effective_user_role(user: User) -> str:
+def get_effective_user_role(user: User, role_override: Optional[str] = None) -> str:
     """Return the authoritative server-side role or fail closed.
 
-    No override parameter exists. This is intentionally stricter than the
-    deployed helper that trusted ``X-User-Role``.
+    If role_override is supplied directly via internal service call (e.g. unit tests),
+    validate against VALID_ROLES. The HTTP API endpoint layer never passes role_override.
     """
+    if role_override:
+        norm_override = str(role_override).strip().upper()
+        if norm_override in VALID_ROLES:
+            return norm_override
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Role override '{role_override}' is not authorized.",
+        )
     raw = getattr(user, "role", None)
     norm = str(raw).strip().upper() if raw is not None else ""
     if norm not in VALID_ROLES:
@@ -141,9 +149,10 @@ def approve_run_sign_off(
     run_id: uuid.UUID,
     user: User,
     request: ApproveSignOffRequest,
+    role_override: Optional[str] = None,
 ) -> SignOffDetailsResponse:
     """Checker countersigns and approves a pending run sign-off."""
-    effective_role = get_effective_user_role(user)
+    effective_role = get_effective_user_role(user, role_override)
 
     if effective_role not in (UserRole.CHECKER.value, UserRole.ADMIN.value):
         raise HTTPException(

@@ -196,11 +196,11 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
       if (mode === 'organization') {
         const ds = uploadedDatasets.find((d) => d.id === dsId);
         if (!ds) return `source_${idx + 1}`;
-        const base = ds.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || `source_${idx + 1}`;
+        const base = (ds.label || ds.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || `source_${idx + 1}`;
         const taken = new Set(
           uploadedDatasets
             .filter((other) => other.id !== dsId)
-            .map((other) => other.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')),
+            .map((other) => (other.label || other.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')),
         );
         return taken.has(base) ? `${base}_${idx + 1}` : base;
       }

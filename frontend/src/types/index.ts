@@ -6,6 +6,7 @@ export interface User {
   id: string;
   email: string;
   full_name?: string | null;
+  role?: string;
   created_at: string;
   updated_at: string;
 }
@@ -48,7 +49,6 @@ export interface PreprocessingConfig {
   normalize_numbers?: boolean;
   identifier_columns?: string[];
   max_rows?: number;
-  /** Batch 7: exact worksheet name for XLSX preprocessing (see batch 7 report). */
   selected_worksheet?: string | null;
 }
 
@@ -83,10 +83,7 @@ export interface PreprocessingResult {
   duplicate_record_row_numbers: number[][];
   issues: ValidationIssue[];
   preview_rows: Record<string, any>[];
-  /** Batch 7: for XLSX workbooks only — worksheet names in workbook order for
-   *  explicit selection. null/undefined for CSV files. */
   sheet_names?: string[] | null;
-  /** Batch 7: the worksheet this preprocessing run parsed (XLSX only; null = active sheet). */
   selected_worksheet?: string | null;
 }
 
@@ -125,6 +122,7 @@ export interface FieldDifference {
   target_type?: string | null;
   difference_type: string;
   reason_code?: string | null;
+  rule_id?: string | null;
   confidence_score?: number | null;
   message?: string | null;
 }
@@ -145,8 +143,6 @@ export interface VerificationResultItem {
   source_file_id?: string | null;
   target_file_id?: string | null;
   lineage?: Record<string, any> | null;
-  /** Batch 5: attributes configured but NOT compared for this record (owner blank,
-   *  or attribute not carried by a source) — explicitly not verified. */
   unverified_fields?: string[] | null;
   source_row_indices?: Record<string, number | null> | null;
   source_records?: Record<string, Record<string, any> | null> | null;
@@ -157,6 +153,21 @@ export interface VerificationResultItem {
   child_records?: any[] | null;
   aggregated_amount?: number | null;
   expected_amount?: number | null;
+  source_amount?: number | null;
+  target_amount?: number | null;
+  variance_amount?: number | null;
+  exposure_amount?: number | null;
+  currency?: string | null;
+  severity?: string | null;
+  resolution_status?: string | null;
+  resolution_note?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  cluster_id?: string | null;
+  cluster_name?: string | null;
+  assigned_to?: string | null;
+  assigned_at?: string | null;
+  side_by_side?: Record<string, any> | null;
   field_differences?: FieldDifference[];
   message?: string | null;
 }
@@ -177,18 +188,21 @@ export interface VerificationSummary {
   duplicate_target_keys_count: number;
   conflicting_duplicate_records?: number;
   total_discrepancies: number;
-  /** Batch 4: records matched via a fallback key after primary-key matching failed. */
-  fallback_matched_records?: number;
-  /** Batch 6: (record, attribute) pairs with ≥1 executed comparison. */
-  attribute_comparisons_completed?: number;
-  /** Batch 6: (record, attribute) pairs with no executed comparison (owner blank,
-   *  attribute unavailable). completed + not_checked = all-present, non-duplicate
-   *  records × configured compare attributes. */
-  attributes_not_checked?: number;
-  /** Batch 8: records with missing/blank/incomplete identity keys — surfaced as
-   *  needs_review, never counted as matches or confirmed duplicates. */
-  invalid_key_records?: number;
   status: string;
+
+  // Financial Materiality & Exposure Metrics
+  gross_exposure?: number;
+  net_variance?: number;
+  claimed_amount?: number;
+  verified_amount?: number;
+  outstanding_amount?: number;
+  currency?: string;
+  exposure_by_currency?: Record<string, Record<string, number>> | null;
+  overall_materiality_ratio?: number;
+  fallback_matched_records?: number;
+  attribute_comparisons_completed?: number;
+  attributes_not_checked?: number;
+  invalid_key_records?: number;
 }
 
 export interface VerificationRequest {
@@ -240,6 +254,15 @@ export interface VerificationRun {
   completed_at?: string | null;
   created_at: string;
   updated_at: string;
+  sign_off_status?: string | null;
+  sign_off_proposed_by?: string | null;
+  sign_off_proposed_by_name?: string | null;
+  sign_off_proposal_note?: string | null;
+  sign_off_proposed_at?: string | null;
+  sign_off_approved_by?: string | null;
+  sign_off_approved_by_name?: string | null;
+  sign_off_decision_note?: string | null;
+  sign_off_decided_at?: string | null;
 }
 
 export interface VerificationRunListResponse {
@@ -257,6 +280,8 @@ export interface DiscrepancyItemResponse {
   key_values: Record<string, any>;
   source_row_number?: number | null;
   target_row_number?: number | null;
+  source_row_index?: number | null;
+  target_row_index?: number | null;
   source_row_numbers?: number[] | null;
   target_row_numbers?: number[] | null;
   source_row_indices?: Record<string, number | null> | null;
@@ -265,6 +290,26 @@ export interface DiscrepancyItemResponse {
   source_presence?: Record<string, boolean> | null;
   source_record?: Record<string, any> | null;
   target_record?: Record<string, any> | null;
+  child_records?: any[] | null;
+  aggregated_amount?: number | null;
+  expected_amount?: number | null;
+  source_amount?: number | null;
+  target_amount?: number | null;
+  variance_amount?: number | null;
+  exposure_amount?: number | null;
+  currency?: string | null;
+  severity?: string | null;
+  resolution_status?: string | null;
+  resolution_note?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  cluster_id?: string | null;
+  cluster_name?: string | null;
+  assigned_to?: string | null;
+  assigned_at?: string | null;
+  side_by_side?: Record<string, any> | null;
+  reason_code?: string | null;
+  confidence_score?: number | null;
   field_differences?: FieldDifference[] | null;
   message?: string | null;
   created_at: string;
@@ -275,6 +320,59 @@ export interface DiscrepancyListResponse {
   items: DiscrepancyItemResponse[];
   skip: number;
   limit: number;
+}
+
+export interface FieldComparisonDiff {
+  field_name: string;
+  source_field?: string | null;
+  target_field?: string | null;
+  raw_source_value?: any;
+  normalized_source_value?: any;
+  raw_target_value?: any;
+  normalized_target_value?: any;
+  is_match: boolean;
+  difference_type?: string | null;
+  reason_code?: string | null;
+  message?: string | null;
+}
+
+export interface SideBySideInspectionResponse {
+  id: string;
+  run_id?: string | null;
+  key_values: Record<string, any>;
+  match_status: MatchStatus;
+  discrepancy_category: DiscrepancyCategory;
+  reason_code?: string | null;
+  confidence_score?: number | null;
+  severity: string;
+
+  source_amount?: number | null;
+  target_amount?: number | null;
+  variance_amount?: number | null;
+  exposure_amount?: number | null;
+  currency?: string | null;
+
+  source_row_index?: number | null;
+  target_row_index?: number | null;
+  source_row_indices?: Record<string, number | null> | null;
+  missing_in_sources?: string[] | null;
+  source_presence?: Record<string, boolean> | null;
+
+  raw_source_record?: Record<string, any> | null;
+  normalized_source_record?: Record<string, any> | null;
+  raw_target_record?: Record<string, any> | null;
+  normalized_target_record?: Record<string, any> | null;
+
+  field_comparisons: FieldComparisonDiff[];
+  failed_rules: Array<{
+    rule?: string;
+    field?: string;
+    description?: string;
+    discrepancy_category?: string;
+  }>;
+  child_records?: any[] | null;
+  message?: string | null;
+  resolution_status?: string | null;
 }
 
 // --- Batch 2: Data Profiling & Quarantine Types ---
@@ -386,55 +484,16 @@ export interface SourceDefinition {
   alias: string;
   file_id: string;
   is_primary?: boolean;
-  /** Batch 2: optional user-editable display label (backend max 120 chars, trimmed). */
-  label?: string | null;
   key_columns: string[];
   field_mapping?: Record<string, string>;
   excluded_row_indices?: number[];
-  /** Batch 7: exact worksheet name for XLSX sources (undefined/None = legacy
-   *  active-sheet behavior). Ignored by the engine for CSV sources. */
-  sheet_name?: string | null;
-}
-
-/** Batch 3 (organization mode): per-file column mapping state.
- *  Maps a canonical/unified attribute name to the source column carrying it,
- *  with a transparent confirmation state. Only 'suggested' (exact normalized
- *  match) and 'confirmed' mappings are sent to the engine; 'needs_confirmation'
- *  suggestions are never auto-submitted. */
-export type MappingState = 'suggested' | 'needs_confirmation' | 'confirmed';
-
-export interface ColumnMappingEntry {
-  column: string | null;
-  state: MappingState;
-}
-
-/** Mapping state per file: canonical attribute -> column entry. */
-export type FileColumnMappings = Record<string, ColumnMappingEntry | undefined>;
-/** A dataset held in wizard state for the active session. */
-export interface UploadedDataset {
-  id: string;
-  name: string;
-  /** Editable, institution-friendly display label (defaults derived from the filename). */
-  label: string;
-  /** Explicit source role. Sources of truth for matching remains backend-validated
-   *  `is_primary` inside SourceDefinition (exactly one primary until Batch 5). */
-  isPrimary: boolean;
-  profile?: PreprocessingResult;
-  /** Batch 7: user-selected worksheet for XLSX sources. Must be set (org mode)
-   *  before the source is eligible for verification. */
-  selectedSheet?: string | null;
 }
 
 export interface MultiSourceVerificationRequest {
   sources: SourceDefinition[];
   unified_keys: string[];
   compare_attributes?: string[] | null;
-  /** Batch 4 (organization mode): ordered fallback matching keys. Each entry is a
-   *  list of canonical attribute names (composite supported), resolved per source
-   *  through field_mapping. Tried in order when the primary key cannot match. */
   fallback_keys?: string[][] | null;
-  /** Batch 5 (organization mode): explicit multi-primary opt-in with per-field
-   *  ownership ({unified_attribute -> owner alias}). Legacy requests omit both. */
   multi_primary?: boolean;
   field_ownership?: Record<string, string> | null;
   ignore_attributes?: string[];
@@ -630,7 +689,277 @@ export interface RulePreviewResponse {
   }>;
 }
 
+// --- Batch 6: Exception Clustering, Signatures & Bulk Human Review Types ---
 
+export interface ExceptionCluster {
+  cluster_id: string;
+  cluster_name: string;
+  reason_code: string;
+  rule_id?: string | null;
+  failed_field_names: string[];
+  source_alias?: string | null;
+  discrepancy_category: string;
+  severity: string;
+  total_records: number;
+  total_exposure: number;
+  currency: string;
+  root_cause_explanation: string;
+  status_counts: Record<string, number>;
+  sample_record?: Record<string, any> | null;
+  discrepancy_ids?: string[] | null;
+  assigned_to?: string | null;
+}
+
+export interface ClusterListResponse {
+  total_clusters: number;
+  total_exceptions: number;
+  total_cluster_exposure: number;
+  clusters: ExceptionCluster[];
+}
+
+export interface ClusterRecordsResponse {
+  cluster_id: string;
+  cluster_name: string;
+  total: number;
+  items: DiscrepancyItemResponse[];
+  skip: number;
+  limit: number;
+}
+
+export interface ReviewDecisionRequest {
+  decision: string;
+  justification: string;
+  reviewer_id?: string;
+  reviewer_email?: string;
+}
+
+export interface ReviewDecisionItem {
+  id: string;
+  discrepancy_id: string;
+  run_id: string;
+  decision: string;
+  justification: string;
+  reviewer_id?: string | null;
+  reviewer_email?: string | null;
+  previous_status?: string | null;
+  new_status: string;
+  is_bulk_action: boolean;
+  cluster_id?: string | null;
+  created_at: string;
+}
+
+export interface BulkReviewRequest {
+  decision: string;
+  justification: string;
+  cluster_id?: string;
+  discrepancy_ids?: string[];
+  max_exposure_threshold?: number;
+  allow_blocking_override?: boolean;
+}
+
+export interface BulkReviewResponse {
+  total_requested: number;
+  succeeded_count: number;
+  failed_count: number;
+  ineligible_count: number;
+  succeeded_ids: string[];
+  failed_records: Array<{ id: string; reason: string }>;
+  message: string;
+}
+
+export interface AssignmentRequest {
+  reviewer_id: string;
+  reviewer_email?: string;
+  cluster_id?: string;
+  discrepancy_ids?: string[];
+}
+
+export interface AssignmentResponse {
+  assigned_count: number;
+  reviewer_id: string;
+  discrepancy_ids: string[];
+  message: string;
+}
+
+// --- Batch 7: Maker–Checker Governance & Tamper-Evident Audit Types ---
+
+export type UserRole = 'MAKER' | 'CHECKER' | 'ADMIN' | 'VIEWER';
+export type SignOffStatus = 'DRAFT' | 'AWAITING_SIGN_OFF' | 'APPROVED' | 'REJECTED';
+
+export interface ProposeSignOffRequest {
+  note?: string;
+  proposed_by_name?: string;
+  proposal_note?: string;
+}
+
+export interface ApproveSignOffRequest {
+  note?: string;
+  approved_by_name?: string;
+  approval_note?: string;
+}
+
+export interface RejectSignOffRequest {
+  note?: string;
+  rejection_reason?: string;
+}
+
+export interface SignOffDetailsResponse {
+  run_id: string;
+  project_id: string;
+  sign_off_status: SignOffStatus | string;
+  status?: SignOffStatus | string;
+  sign_off_proposed_by?: string | null;
+  proposed_by?: string | null;
+  sign_off_proposed_by_name?: string | null;
+  proposed_by_name?: string | null;
+  sign_off_proposal_note?: string | null;
+  proposal_note?: string | null;
+  sign_off_proposed_at?: string | null;
+  proposed_at?: string | null;
+  sign_off_approved_by?: string | null;
+  approved_by?: string | null;
+  sign_off_approved_by_name?: string | null;
+  approved_by_name?: string | null;
+  sign_off_decision_note?: string | null;
+  decision_note?: string | null;
+  sign_off_decided_at?: string | null;
+  decided_at?: string | null;
+  can_approve: boolean;
+  can_propose?: boolean;
+  can_reject?: boolean;
+  is_maker: boolean;
+  effective_role?: string;
+}
+
+export interface AuditEventResponse {
+  id: string;
+  event_id: string;
+  sequence_number: number;
+  run_id?: string | null;
+  project_id: string;
+  user_id?: string | null;
+  user_email?: string | null;
+  user_role: string;
+  event_type: string;
+  timestamp_utc: string;
+  timestamp_str: string;
+  event_payload: Record<string, any>;
+  previous_event_hash: string;
+  current_event_hash: string;
+}
+
+export interface AuditTrailResponse {
+  total: number;
+  items: AuditEventResponse[];
+  is_chain_valid: boolean;
+  head_hash?: string | null;
+  genesis_hash: string;
+}
+
+export interface AuditVerificationBrokenLink {
+  sequence_number: number;
+  event_id: string;
+  reason: string;
+  expected_hash: string;
+  actual_hash: string;
+}
+
+export interface AuditVerificationResponse {
+  status: 'VALID' | 'TAMPERED';
+  is_valid: boolean;
+  total_events: number;
+  head_hash?: string | null;
+  genesis_hash: string;
+  broken_link?: AuditVerificationBrokenLink | null;
+  message: string;
+}
+
+export interface ExpectedSourceSchema {
+  alias: string;
+  original_filename_hint?: string;
+  key_columns: string[];
+  field_mapping: Record<string, string>;
+  expected_columns: string[];
+  is_primary?: boolean;
+}
+
+export interface RecipeQuarantineDefaults {
+  exclude_quarantined_rows?: boolean;
+  auto_quarantine_duplicates?: boolean;
+  auto_quarantine_malformed_dates?: boolean;
+  auto_quarantine_negative_currency?: boolean;
+}
+
+export interface VerificationRecipe {
+  version: string;
+  recipe_name: string;
+  description?: string;
+  exported_at?: string;
+  created_by?: string;
+  unified_keys: string[];
+  numeric_tolerance?: number;
+  sources: ExpectedSourceSchema[];
+  rule_config?: Record<string, any>;
+  quarantine_defaults?: RecipeQuarantineDefaults;
+  metadata?: Record<string, any>;
+}
+
+export interface RecipeApplyRequest {
+  recipe: VerificationRecipe;
+  file_ids: string[];
+  file_mappings?: Record<string, string>;
+}
+
+export interface RecipeSourceMatch {
+  alias: string;
+  matched_file_id?: string | null;
+  matched_filename?: string | null;
+  confidence_score: number;
+  matched_columns: string[];
+  missing_key_columns: string[];
+  is_compatible: boolean;
+}
+
+export interface RecipeApplyValidationResult {
+  valid: boolean;
+  total_sources_expected: number;
+  total_sources_matched: number;
+  matches: RecipeSourceMatch[];
+  suggested_source_aliases: Record<string, string>;
+  suggested_file_key_columns: Record<string, string[]>;
+  suggested_unified_keys: string[];
+  suggested_column_mappings: Record<string, Record<string, string>>;
+  rule_config?: Record<string, any>;
+  numeric_tolerance?: number;
+  quarantine_defaults?: Record<string, any>;
+  validation_errors: string[];
+  validation_warnings: string[];
+}
+
+
+
+
+
+
+// --- Organization Mode Column Mapping Types ---
+export type MappingState = 'suggested' | 'confirmed' | 'needs_confirmation' | 'unmapped';
+
+export interface ColumnMappingEntry {
+  column: string | null;
+  state: MappingState;
+  sampleValue?: any;
+}
+
+export type FileColumnMappings = Record<string, ColumnMappingEntry>;
+
+export interface UploadedDataset {
+  id: string;
+  name: string;
+  label?: string;
+  isPrimary?: boolean;
+  selectedSheet?: string | null;
+  profile?: PreprocessingResult;
+}
 
 // ===================== Batch 11: Verification Templates =====================
 
