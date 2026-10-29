@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
 
 from fastapi import HTTPException, status
+from sqlalchemy import cast, func, or_, String
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -26,9 +27,11 @@ from rapidfuzz import fuzz
 
 from app.schemas.result import (
     DiscrepancyCategory,
+    FieldComparisonDiff,
     FieldDifference,
     MatchStatus,
     ReasonCode,
+    SideBySideInspectionResponse,
     VerificationRequest,
     VerificationResponse,
     VerificationResultItem,
@@ -39,7 +42,12 @@ from app.schemas.multisource import (
     MultiSourceVerificationResponse,
     SourceDefinition,
 )
-from app.services.preprocessing import extract_dataset_records
+from app.services.clustering_service import (
+    compute_exception_signature,
+    generate_cluster_id,
+    generate_cluster_name,
+)
+from app.services.preprocessing import extract_dataset_records, get_active_worksheet_name, list_worksheet_names
 from app.services.project_service import get_project_by_id
 from app.utils.normalization import (
     clean_whitespace,
@@ -287,6 +295,24 @@ def normalize_key_value(
     return val_str
 
 
+def key_tuple_is_valid(k_tuple: Tuple[Any, ...]) -> bool:
+    """
+    Batch 8: shared identity-key validity rule.
+
+    A key component is VALID only if it is not None and not a whitespace-only
+    (or empty) string. A composite key is valid only if EVERY component is valid.
+    Missing columns and unmapped identity attributes surface as None here and are
+    therefore invalid — they must never establish identity. Valid values keep the
+    existing normalization semantics (leading zeros preserved as exact strings).
+    """
+    for v in k_tuple:
+        if v is None:
+            return False
+        if isinstance(v, str) and not v.strip():
+            return False
+    return True
+
+
 def compare_field_values(
     src_val: Any,
     tgt_val: Any,
@@ -382,6 +408,21 @@ def compare_field_values(
 
     diff_type = "type_mismatch" if type(src_val) != type(tgt_val) else "value_mismatch"
     return False, diff_type, type(src_val).__name__, type(tgt_val).__name__
+
+
+def _resolve_mapped_column(field_mapping: Dict[str, str], attr: str) -> str:
+    """Resolve a unified attribute name to this source's column via field_mapping.
+
+    The documented contract is ``{source_column -> unified_attribute}``; the
+    primary resolution is therefore a reverse scan (attribute value match).
+    A direct key hit (``{unified -> source_column}`` interpretation) is
+    supported as a fallback for legacy/identity-style mappings. Falls back to
+    the attribute name itself when no mapping applies.
+    """
+    for src_col, uni_attr in field_mapping.items():
+        if uni_attr == attr:
+            return src_col
+    return field_mapping.get(attr, attr)
 
 
 def _resolve_column(
@@ -589,6 +630,8 @@ def verify_datasets(
     source_key_groups: Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
     target_key_groups: Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
     key_display_dicts: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    # Batch 8: tuples with any blank/null/whitespace component never identity-match.
+    invalid_key_tuples: Set[Tuple[Any, ...]] = set()
 
     for row_num, rec in source_records:
         k_tuple_vals = []
@@ -609,6 +652,8 @@ def verify_datasets(
                 )
             k_tuple_vals.append(k_norm)
         k_tuple = tuple(k_tuple_vals)
+        if not key_tuple_is_valid(k_tuple):
+            invalid_key_tuples.add(k_tuple)
         source_key_groups[k_tuple].append((row_num, rec))
         if k_tuple not in key_display_dicts:
             key_display_dicts[k_tuple] = k_disp
@@ -633,6 +678,8 @@ def verify_datasets(
                 )
             k_tuple_vals.append(k_norm)
         k_tuple = tuple(k_tuple_vals)
+        if not key_tuple_is_valid(k_tuple):
+            invalid_key_tuples.add(k_tuple)
         target_key_groups[k_tuple].append((row_num, rec))
         if k_tuple not in key_display_dicts:
             key_display_dicts[k_tuple] = k_disp
@@ -656,6 +703,8 @@ def verify_datasets(
     duplicate_source_keys_count = 0
     duplicate_target_keys_count = 0
     conflicting_duplicate_records = 0
+    # Batch 8: invalid-key records surfaced explicitly, never matched.
+    invalid_key_records = 0
 
     # Collect single unmatched records for candidate evaluation if enabled
     single_unmatched_src: List[Tuple[Tuple[Any, ...], int, Dict[str, Any]]] = []
@@ -668,6 +717,56 @@ def verify_datasets(
 
         s_count = len(s_list)
         t_count = len(t_list)
+
+        # Batch 8: invalid identity keys are surfaced per record as explicit
+        # needs_review outcomes — never matched (even 1-to-1 blank-to-blank),
+        # never labeled confirmed duplicates, never passed to the fuzzy pass.
+        if k_tuple in invalid_key_tuples:
+            invalid_key_records += s_count + t_count
+            for row_num, rec in s_list:
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.NEEDS_REVIEW,
+                    discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                    reason_code=ReasonCode.NULL_KEY,
+                    source_row_indices={"source": row_num},
+                    source_records={"source": rec},
+                    missing_in_sources=["target"],
+                    source_presence={"source": True, "target": False},
+                    source_row_number=row_num,
+                    source_record=rec,
+                    field_differences=[],
+                    message=(
+                        "Identity key missing or incomplete; automatic matching was not performed. "
+                        "This record is NOT a confirmed match or a confirmed duplicate."
+                    ),
+                    lineage={"matching_method": "invalid_key"},
+                )
+                results.append(item)
+                discrepancies.append(item)
+            for row_num, rec in t_list:
+                item = VerificationResultItem(
+                    key_values=k_dict,
+                    match_status=MatchStatus.NEEDS_REVIEW,
+                    discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                    reason_code=ReasonCode.NULL_KEY,
+                    source_row_indices={"target": row_num},
+                    source_records={"target": rec},
+                    missing_in_sources=["source"],
+                    source_presence={"source": False, "target": True},
+                    source_row_number=None,
+                    target_row_number=row_num,
+                    target_record=rec,
+                    field_differences=[],
+                    message=(
+                        "Identity key missing or incomplete; automatic matching was not performed. "
+                        "This record is NOT a confirmed match or a confirmed duplicate."
+                    ),
+                    lineage={"matching_method": "invalid_key"},
+                )
+                results.append(item)
+                discrepancies.append(item)
+            continue
 
         # Case 1: Unique 1-to-1 match on key
         if s_count == 1 and t_count == 1:
@@ -1348,9 +1447,19 @@ def verify_datasets(
         duplicate_source_keys_count=duplicate_source_keys_count,
         duplicate_target_keys_count=duplicate_target_keys_count,
         conflicting_duplicate_records=conflicting_duplicate_records,
+        invalid_key_records=invalid_key_records,
         total_discrepancies=total_discrepancies,
         status=status_str,
     )
+
+    from app.services.materiality_engine import (
+        compute_record_materiality,
+        compute_summary_materiality,
+    )
+
+    for r in results:
+        compute_record_materiality(r, column_mapping=column_mapping)
+    summary = compute_summary_materiality(results, discrepancies, summary)
 
     return summary, results, discrepancies, warnings, errors
 
@@ -1444,8 +1553,20 @@ def verify_project_files(
     ) = extract_dataset_records(tgt_path, target_file.file_type, cfg)
 
     from app.services.profiling_service import get_excluded_row_indices_for_file
-    ex_src = request.excluded_source_rows or get_excluded_row_indices_for_file(src_path)
-    ex_tgt = request.excluded_target_rows or get_excluded_row_indices_for_file(tgt_path)
+    # Batch 9: quarantine sidecars are worksheet-aware. Resolve the effective
+    # worksheet exactly as extraction does (explicit config selection, else the
+    # workbook's active sheet for XLSX; CSV has no worksheet association) so
+    # exclusions are only read from the matching worksheet's sidecar.
+    ex_src_worksheet = (
+        None if source_file.file_type.lower() != "xlsx"
+        else (cfg.selected_worksheet or get_active_worksheet_name(src_path))
+    )
+    ex_tgt_worksheet = (
+        None if target_file.file_type.lower() != "xlsx"
+        else (cfg.selected_worksheet or get_active_worksheet_name(tgt_path))
+    )
+    ex_src = request.excluded_source_rows or get_excluded_row_indices_for_file(src_path, ex_src_worksheet)
+    ex_tgt = request.excluded_target_rows or get_excluded_row_indices_for_file(tgt_path, ex_tgt_worksheet)
 
     # 5. Run verification engine
     summary, results, discrepancies, comp_warnings, comp_errors = verify_datasets(
@@ -1605,8 +1726,16 @@ def create_and_execute_verification_run(
             ) = extract_dataset_records(tgt_path, target_file.file_type, cfg)
 
             from app.services.profiling_service import get_excluded_row_indices_for_file
-            ex_src = request.excluded_source_rows or get_excluded_row_indices_for_file(src_path)
-            ex_tgt = request.excluded_target_rows or get_excluded_row_indices_for_file(tgt_path)
+            ex_src = request.excluded_source_rows or get_excluded_row_indices_for_file(
+                src_path,
+                None if source_file.file_type.lower() != "xlsx"
+                else (cfg.selected_worksheet or get_active_worksheet_name(src_path)),
+            )
+            ex_tgt = request.excluded_target_rows or get_excluded_row_indices_for_file(
+                tgt_path,
+                None if target_file.file_type.lower() != "xlsx"
+                else (cfg.selected_worksheet or get_active_worksheet_name(tgt_path)),
+            )
 
             summary, results, discrepancies, comp_warnings, comp_errors = verify_datasets(
                 source_records=src_records,
@@ -1636,6 +1765,9 @@ def create_and_execute_verification_run(
 
             # Bulk save discrepancies (never store full dataset rows, only discrepancies)
             for item in discrepancies:
+                sig = compute_exception_signature(item)
+                cid = generate_cluster_id(sig)
+                cname = generate_cluster_name(sig, item)[:255]
                 disc = VerificationDiscrepancy(
                     run_id=run.id,
                     match_status=item.match_status.value,
@@ -1645,8 +1777,29 @@ def create_and_execute_verification_run(
                     target_row_number=item.target_row_number,
                     source_row_numbers=item.source_row_numbers,
                     target_row_numbers=item.target_row_numbers,
+                    source_row_indices=item.source_row_indices,
+                    source_records=item.source_records,
                     source_record=item.source_record,
                     target_record=item.target_record,
+                    child_records=item.child_records,
+                    aggregated_amount=item.aggregated_amount,
+                    expected_amount=item.expected_amount,
+                    source_amount=item.source_amount,
+                    target_amount=item.target_amount,
+                    variance_amount=item.variance_amount,
+                    exposure_amount=item.exposure_amount,
+                    currency=item.currency or "USD",
+                    severity=item.severity or "medium",
+                    resolution_status=item.resolution_status or "unresolved",
+                    cluster_id=cid,
+                    cluster_name=cname,
+                    side_by_side=item.side_by_side,
+                    _reason_code=(
+                        item.reason_code.value
+                        if hasattr(item.reason_code, "value")
+                        else (str(item.reason_code) if item.reason_code else None)
+                    ),
+                    _confidence_score=item.confidence_score,
                     field_differences=[d.model_dump() for d in item.field_differences] if item.field_differences else None,
                     message=item.message,
                 )
@@ -1729,6 +1882,14 @@ def list_run_discrepancies(
     limit: int = 50,
     discrepancy_category: Optional[str] = None,
     match_status: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+    reason_code: Optional[str] = None,
+    source_alias: Optional[str] = None,
+    rule_failure_type: Optional[str] = None,
+    resolution_status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    cluster_id: Optional[str] = None,
     sort_by: str = "source_row_number",
     sort_order: str = "asc",
 ) -> Tuple[int, List[VerificationDiscrepancy]]:
@@ -1739,9 +1900,23 @@ def list_run_discrepancies(
     valid_sort_fields = {
         "source_row_number": VerificationDiscrepancy.source_row_number,
         "target_row_number": VerificationDiscrepancy.target_row_number,
+        "source_row_index": VerificationDiscrepancy.source_row_number,
+        "target_row_index": VerificationDiscrepancy.target_row_number,
         "created_at": VerificationDiscrepancy.created_at,
         "match_status": VerificationDiscrepancy.match_status,
         "discrepancy_category": VerificationDiscrepancy.discrepancy_category,
+        "exposure_amount": VerificationDiscrepancy.exposure_amount,
+        "exposure": VerificationDiscrepancy.exposure_amount,
+        "variance_amount": VerificationDiscrepancy.variance_amount,
+        "variance": VerificationDiscrepancy.variance_amount,
+        "source_amount": VerificationDiscrepancy.source_amount,
+        "target_amount": VerificationDiscrepancy.target_amount,
+        "confidence_score": VerificationDiscrepancy._confidence_score,
+        "severity": VerificationDiscrepancy.severity,
+        "resolution_status": VerificationDiscrepancy.resolution_status,
+        "reason_code": VerificationDiscrepancy._reason_code,
+        "cluster_id": VerificationDiscrepancy.cluster_id,
+        "assigned_to": VerificationDiscrepancy.assigned_to,
     }
     clean_sort_by = sort_by.strip()
     if clean_sort_by not in valid_sort_fields:
@@ -1762,6 +1937,43 @@ def list_run_discrepancies(
         query = query.filter(VerificationDiscrepancy.discrepancy_category == discrepancy_category)
     if match_status:
         query = query.filter(VerificationDiscrepancy.match_status == match_status)
+    if min_amount is not None:
+        query = query.filter(func.coalesce(VerificationDiscrepancy.exposure_amount, 0.0) >= min_amount)
+    if max_amount is not None:
+        query = query.filter(func.coalesce(VerificationDiscrepancy.exposure_amount, 0.0) <= max_amount)
+    if reason_code:
+        query = query.filter(VerificationDiscrepancy._reason_code == reason_code)
+    if resolution_status:
+        query = query.filter(VerificationDiscrepancy.resolution_status == resolution_status)
+    if rule_failure_type:
+        query = query.filter(
+            or_(
+                VerificationDiscrepancy.discrepancy_category == rule_failure_type,
+                VerificationDiscrepancy._reason_code == rule_failure_type,
+            )
+        )
+    if source_alias:
+        query = query.filter(
+            or_(
+                cast(VerificationDiscrepancy.source_row_indices, String).like(f'%"{source_alias}"%'),
+                cast(VerificationDiscrepancy.source_records, String).like(f'%"{source_alias}"%'),
+            )
+        )
+    if cluster_id:
+        query = query.filter(VerificationDiscrepancy.cluster_id == cluster_id)
+    if assigned_to:
+        if assigned_to.upper() == "ASSIGNED_TO_ME":
+            user_id = str(current_user.id) if (current_user and hasattr(current_user, "id")) else None
+            user_email = current_user.email if (current_user and hasattr(current_user, "email")) else None
+            user_match = [u for u in [user_id, user_email] if u]
+            if user_match:
+                query = query.filter(VerificationDiscrepancy.assigned_to.in_(user_match))
+            else:
+                query = query.filter(VerificationDiscrepancy.assigned_to.is_not(None))
+        elif assigned_to.upper() == "UNASSIGNED":
+            query = query.filter(VerificationDiscrepancy.assigned_to.is_(None))
+        else:
+            query = query.filter(VerificationDiscrepancy.assigned_to == assigned_to)
 
     total = query.count()
 
@@ -1775,6 +1987,64 @@ def list_run_discrepancies(
         .all()
     )
     return total, items
+
+
+def get_discrepancy_inspection(
+    db: Session,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    discrepancy_id: uuid.UUID,
+    current_user: Optional[User] = None,
+) -> SideBySideInspectionResponse:
+    """Retrieve detailed side-by-side inspection and normalization diffs for a discrepancy."""
+    get_verification_run(db, project_id, run_id, current_user=current_user)
+
+    disc = db.query(VerificationDiscrepancy).filter(
+        VerificationDiscrepancy.id == discrepancy_id,
+        VerificationDiscrepancy.run_id == run_id,
+    ).first()
+    if disc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Discrepancy record not found.",
+        )
+
+    side_by_side = disc.side_by_side
+    if not side_by_side:
+        from app.services.materiality_engine import build_side_by_side_payload
+        side_by_side = build_side_by_side_payload(disc)
+
+    field_comparisons = [
+        FieldComparisonDiff(**c) for c in (side_by_side.get("field_comparisons") or [])
+    ]
+
+    return SideBySideInspectionResponse(
+        id=str(disc.id),
+        run_id=disc.run_id,
+        key_values=disc.key_values,
+        match_status=disc.match_status,
+        discrepancy_category=disc.discrepancy_category,
+        reason_code=disc.reason_code,
+        confidence_score=disc.confidence_score,
+        severity=disc.severity or "medium",
+        source_amount=disc.source_amount,
+        target_amount=disc.target_amount,
+        variance_amount=disc.variance_amount,
+        exposure_amount=disc.exposure_amount,
+        currency=disc.currency or "USD",
+        source_row_index=disc.source_row_number,
+        target_row_index=disc.target_row_number,
+        source_row_indices=disc.source_row_indices,
+        raw_source_record=side_by_side.get("raw_source_record") or disc.source_record,
+        normalized_source_record=side_by_side.get("normalized_source_record"),
+        raw_target_record=side_by_side.get("raw_target_record") or disc.target_record,
+        normalized_target_record=side_by_side.get("normalized_target_record"),
+        field_comparisons=field_comparisons,
+        failed_rules=side_by_side.get("failed_rules") or [],
+        child_records=disc.child_records,
+        message=disc.message,
+        resolution_status=disc.resolution_status or "unresolved",
+    )
 
 
 def get_verification_run_summary(
@@ -1801,6 +2071,9 @@ def verify_multisource_datasets(
     include_identical: bool = True,
     status_rules: Optional[Dict[str, Any]] = None,
     rule_config: Optional[Any] = None,
+    fallback_keys: Optional[List[List[str]]] = None,
+    multi_primary: bool = False,
+    field_ownership: Optional[Dict[str, str]] = None,
 ) -> Tuple[
     VerificationSummary,
     List[VerificationResultItem],
@@ -1821,6 +2094,17 @@ def verify_multisource_datasets(
 
     primary_source = next((s for s in sources if s.is_primary), sources[0])
     primary_alias = primary_source.alias
+
+    # Batch 5: per-attribute ownership (multi-primary mode). Ownership determines
+    # which source's value is authoritative for each compared attribute; identity
+    # matching (which records represent the same entity) is unaffected. Attributes
+    # without an explicit owner default to the first primary source.
+    sources_by_alias: Dict[str, SourceDefinition] = {s.alias: s for s in sources}
+    field_owner_map: Dict[str, str] = {
+        a.strip(): o.strip()
+        for a, o in (field_ownership or {}).items()
+        if a and a.strip() and o and o.strip()
+    }
 
     # Apply quarantine exclusions per source
     filtered_records: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
@@ -1865,7 +2149,12 @@ def verify_multisource_datasets(
     source_key_groups: Dict[str, Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]]] = defaultdict(
         lambda: defaultdict(list)
     )
+    # Batch 4: per-source map of row number -> the primary key tuple it belongs to.
+    row_tuple_map: Dict[str, Dict[int, Tuple[Any, ...]]] = {s.alias: {} for s in sources}
     key_display_dicts: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    # Batch 8: tuples containing any blank/null/whitespace-only component. Records
+    # grouped under these tuples must NEVER be identity-matched on the invalid key.
+    invalid_key_tuples: Set[Tuple[Any, ...]] = set()
 
     for s in sources:
         alias = s.alias
@@ -1896,7 +2185,10 @@ def verify_multisource_datasets(
                 k_tuple_vals.append(k_norm)
 
             k_tuple = tuple(k_tuple_vals)
+            if not key_tuple_is_valid(k_tuple):
+                invalid_key_tuples.add(k_tuple)
             source_key_groups[alias][k_tuple].append((r_num, rec))
+            row_tuple_map[alias][r_num] = k_tuple
             if k_tuple not in key_display_dicts:
                 key_display_dicts[k_tuple] = k_disp
 
@@ -1938,6 +2230,118 @@ def verify_multisource_datasets(
     duplicate_source_keys_count = 0
     duplicate_target_keys_count = 0
     matched_records = 0
+    fallback_matched = 0
+    # Batch 8: records whose identity key is invalid — surfaced, never matched.
+    invalid_key_records = 0
+    # Batch 6: attribute-level coverage counters (per record-attribute pair).
+    attribute_comparisons_completed = 0
+    attributes_not_checked = 0
+
+    # ---------------------------------------------------------------------
+    # Batch 4: deterministic fallback matching structures.
+    # Fallbacks are tried (in configured order) only for key tuples the primary
+    # key could not match. Values are normalized with the same semantics as the
+    # primary key (leading zeroes preserved); blank/null components never match.
+    # ---------------------------------------------------------------------
+    fallback_defs = [list(dict.fromkeys(a.strip() for a in fk if a and a.strip())) for fk in (fallback_keys or [])]
+    fallback_defs = [fk for fk in fallback_defs if fk]
+    # Rows already consumed by an earlier fallback match — guarantees one-to-one
+    # assignment and prevents reassigning primary-key-matched records.
+    consumed_rows: Dict[str, Set[int]] = {s.alias: set() for s in sources}
+    # Per fallback definition -> per alias -> (resolved columns, {norm_tuple: [(row, rec)]})
+    fb_indexes: List[Dict[str, Tuple[List[str], Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]]]]] = []
+    for fb_attrs in fallback_defs:
+        per_source: Dict[str, Tuple[List[str], Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]]]] = {}
+        for s in sources:
+            fb_cols = [_resolve_mapped_column(s.field_mapping, a) for a in fb_attrs]
+            idx: Dict[Tuple[Any, ...], List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+            for r_num, rec in filtered_records[s.alias]:
+                vals = [
+                    normalize_key_value(rec.get(c), null_set, ignore_whitespace, ignore_case)
+                    for c in fb_cols
+                ]
+                if any(v is None for v in vals):
+                    continue  # never index (and never match) on blank/missing values
+                idx[tuple(vals)].append((r_num, rec))
+            per_source[s.alias] = (fb_cols, idx)
+        fb_indexes.append(per_source)
+
+    # Batch 4 pre-pass: pair records whose primary-key tuple cannot establish a
+    # comparable match (tuple not present in all sources) through fallback keys,
+    # deterministically, before any result item is emitted.
+    #  - Duplicate-key tuples keep their explicit DUPLICATE outcome and never fall back.
+    #  - Tuples are processed in sorted order; within a source, row order breaks ties.
+    #  - Blank/null fallback components never match (no matching on shared missing values).
+    #  - A fallback resolves only with EXACTLY ONE unconsumed candidate per missing
+    #    source; otherwise the definition is skipped — ambiguity is never resolved.
+    #  - Consumed rows are removed from the candidate pool, guaranteeing one-to-one
+    #    assignment (no one-to-many merges).
+    fallback_matches: Dict[Tuple[Any, ...], Dict[str, Tuple[int, Dict[str, Any]]]] = {}
+    fb_lineage_by_tuple: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+    if fallback_defs:
+        def _tuple_is_comparable(t: Tuple[Any, ...]) -> bool:
+            # Batch 8: an invalid identity key can never establish a primary-key
+            # match — such records may still be resolved through a VALID fallback
+            # key below (explicitly configured, unambiguous, one-to-one).
+            if not key_tuple_is_valid(t):
+                return False
+            if any(len(source_key_groups[s.alias].get(t, [])) > 1 for s in sources):
+                return False  # duplicate-key tuples keep their explicit outcome
+            return all(len(source_key_groups[s.alias].get(t, [])) > 0 for s in sources)
+
+        primary_free = [
+            (row_tuple_map[primary_alias][rn], rn, rec)
+            for rn, rec in filtered_records[primary_alias]
+            if not _tuple_is_comparable(row_tuple_map[primary_alias][rn])
+        ]
+        primary_free.sort(key=lambda x: (str(x[0]), x[1]))
+
+        for prim_tuple, _rn_p, prim_rec_fb in primary_free:
+            missing_sources = [
+                s.alias for s in sources
+                if s.alias != primary_alias
+                and not source_key_groups[s.alias].get(prim_tuple)
+            ]
+            if not missing_sources:
+                continue
+            for fb_i, fb_attrs in enumerate(fallback_defs):
+                fb_cols, _p_idx = fb_indexes[fb_i][primary_alias]
+                p_vals = [
+                    normalize_key_value(prim_rec_fb.get(c), null_set, ignore_whitespace, ignore_case)
+                    for c in fb_cols
+                ]
+                if any(v is None for v in p_vals):
+                    continue  # blank/whitespace fallback values never match
+                p_fb_tuple = tuple(p_vals)
+                matched_candidates: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+                unambiguous = True
+                for alias in missing_sources:
+                    _c, a_idx = fb_indexes[fb_i][alias]
+                    candidates = [
+                        (rn, rc) for rn, rc in a_idx.get(p_fb_tuple, [])
+                        if rn not in consumed_rows[alias]
+                    ]
+                    if len(candidates) != 1:
+                        unambiguous = False
+                        break
+                    matched_candidates[alias] = candidates[0]
+                if not unambiguous:
+                    continue
+                for alias, (rn, rc) in matched_candidates.items():
+                    consumed_rows[alias].add(rn)
+                fallback_matched += 1
+                fallback_matches[prim_tuple] = matched_candidates
+                fb_lineage_by_tuple[prim_tuple] = {
+                    "matching_method": "fallback_key",
+                    "fallback_key_index": fb_i,
+                    "fallback_key": list(fb_attrs),
+                    "fallback_values": {a: v for a, v in zip(fb_attrs, p_vals)},
+                    "fallback_columns": {
+                        alias: fb_indexes[fb_i][alias][0] for alias in matched_candidates
+                    },
+                }
+                break
+
 
     for k_tuple in all_keys:
         presence = {s.alias: (len(source_key_groups[s.alias].get(k_tuple, [])) > 0) for s in sources}
@@ -1951,6 +2355,47 @@ def verify_multisource_datasets(
             for s in sources
         }
         k_dict = key_display_dicts[k_tuple]
+
+        # Batch 8: invalid identity keys. Records grouped under a tuple with any
+        # blank/null/whitespace component are NEVER matched on that key and are
+        # never labeled as confirmed duplicates. They remain visible as explicit
+        # needs_review outcomes (resolved only via a valid fallback match above).
+        if k_tuple in invalid_key_tuples and k_tuple not in fallback_matches:
+            # Batch 9: emit ONE item per RECORD (not per tuple). Multiple records
+            # sharing an equal invalid tuple must each remain represented — extra
+            # blank-key records in the same source must never collapse into the
+            # first record's item.
+            rec_count = sum(len(source_key_groups[s.alias].get(k_tuple, [])) for s in sources)
+            invalid_key_records += rec_count
+            # No comparison ran for these pairs — counted as not checked so the
+            # coverage identity (completed + not_checked = denominator) holds.
+            attributes_not_checked += len(compare_attrs) * rec_count
+            for s in sources:
+                for row_num, rec in source_key_groups[s.alias].get(k_tuple, []):
+                    item = VerificationResultItem(
+                        key_values=k_dict,
+                        match_status=MatchStatus.NEEDS_REVIEW,
+                        discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                        reason_code=ReasonCode.NULL_KEY,
+                        source_row_indices={s.alias: row_num},
+                        source_records={s.alias: rec},
+                        missing_in_sources=[a.alias for a in sources if a.alias != s.alias],
+                        source_presence={a.alias: (a.alias == s.alias) for a in sources},
+                        source_row_number=row_num if s.alias == primary_alias else None,
+                        target_row_number=row_num if s.alias != primary_alias else None,
+                        source_record=rec if s.alias == primary_alias else None,
+                        target_record=rec if s.alias != primary_alias else None,
+                        field_differences=[],
+                        message=(
+                            "Identity key missing or incomplete; automatic matching was not performed. "
+                            "This record is NOT a confirmed match or a confirmed duplicate."
+                        ),
+                        lineage={"matching_method": "invalid_key", "record_source": s.alias},
+                        unverified_fields=sorted(compare_attrs) or None,
+                    )
+                    results.append(item)
+                    discrepancies.append(item)
+            continue
 
         has_dupes = any(c > 1 for c in dupe_counts.values())
 
@@ -1988,22 +2433,83 @@ def verify_multisource_datasets(
             discrepancies.append(item)
             continue
 
+        # Batch 4: skip tuples whose records (in every source present here) were
+        # already consumed by an earlier fallback match — they were matched under
+        # a different primary key, and re-reporting them would double-count.
+        present_groups = [
+            (s.alias, source_key_groups[s.alias].get(k_tuple, []))
+            for s in sources
+        ]
+        non_empty = [(alias, g) for alias, g in present_groups if g]
+        if non_empty and all(
+            all(rn in consumed_rows[alias] for rn, _ in g)
+            for alias, g in non_empty
+        ):
+            continue
+
+        # Batch 4: apply pre-computed fallback matches for this tuple (the primary
+        # key could not establish a match here; a unique fallback candidate was
+        # found for every previously-missing source in the deterministic pre-pass).
+        fb_lineage = fb_lineage_by_tuple.get(k_tuple)
+        if fb_lineage is None and multi_primary:
+            fb_lineage = {"matching_method": "primary_key", "ownership_mode": "multi_primary"}
+        if k_tuple in fallback_matches:
+            for alias, (rn, rec) in fallback_matches[k_tuple].items():
+                presence[alias] = True
+                row_indices[alias] = rn
+                source_recs_map[alias] = rec
+
         if all(presence.values()):
             matched_records += 1
             diffs: List[FieldDifference] = []
             has_status_mismatch = False
+            unverified_attrs: Set[str] = set()
+            attr_compared_flags: Dict[str, bool] = {}
             prim_rec = source_recs_map[primary_alias]
 
             for attr in compare_attrs:
-                prim_col = primary_source.field_mapping.get(attr, attr)
-                val_prim = prim_rec.get(prim_col)
+                # Batch 6: track whether this record-attribute pair had at least one
+                # executed comparison (authoritative value vs a carrying source).
+                attr_compared = False
+                # Batch 5: the attribute's configured owner (multi-primary mode) or
+                # the primary source (legacy mode) supplies the authoritative value.
+                if multi_primary:
+                    owner_alias = field_owner_map.get(attr, primary_alias)
+                    owner_source = sources_by_alias.get(owner_alias, primary_source)
+                    owner_col = _resolve_mapped_column(owner_source.field_mapping, attr)
+                    owner_rec = source_recs_map.get(owner_alias)
+                    val_prim = owner_rec.get(owner_col) if owner_rec else None
+                    if is_null_value(val_prim, null_set):
+                        # Never promote another source to authority when the owner's
+                        # value is blank: the attribute is explicitly NOT verified.
+                        unverified_attrs.add(attr)
+                        # Batch 6: record the pair as not-checked (the flag must be
+                        # recorded BEFORE any continue so it reaches the tally).
+                        attr_compared_flags[attr] = attr_compared
+                        continue
+                else:
+                    owner_alias = primary_alias
+                    owner_source = primary_source
+                    owner_col = _resolve_mapped_column(owner_source.field_mapping, attr)
+                    val_prim = prim_rec.get(owner_col)
 
                 for sec_s in sources:
-                    if sec_s.alias == primary_alias:
+                    if sec_s.alias == owner_alias:
                         continue
                     sec_rec = source_recs_map[sec_s.alias]
-                    sec_col = sec_s.field_mapping.get(attr, attr)
+                    # Batch 5 (multi-primary only): sources that do not carry the
+                    # attribute (no mapping and no same-name column) are not compared
+                    # against a default None — that would fabricate a null_mismatch.
+                    if multi_primary:
+                        sec_col_probe = _resolve_mapped_column(sec_s.field_mapping, attr)
+                        if sec_col_probe == attr and attr not in sec_rec:
+                            unverified_attrs.add(attr)
+                            continue
+                    sec_col = _resolve_mapped_column(sec_s.field_mapping, attr)
                     val_sec = sec_rec.get(sec_col)
+                    # An actual comparison is executing for this pair (status rules
+                    # and value comparison both count as meaningful checks).
+                    attr_compared = True
 
                     if is_status_column(attr, status_rules):
                         is_perm, stat_msg = evaluate_status_rule(val_prim, val_sec, status_rules)
@@ -2012,7 +2518,7 @@ def verify_multisource_datasets(
                             diffs.append(
                                 FieldDifference(
                                     field_name=attr,
-                                    source_field=f"{primary_alias}.{prim_col}",
+                                    source_field=f"{owner_alias}.{owner_col}",
                                     target_field=f"{sec_s.alias}.{sec_col}",
                                     source_value=val_prim,
                                     target_value=val_sec,
@@ -2037,7 +2543,7 @@ def verify_multisource_datasets(
                         diffs.append(
                             FieldDifference(
                                 field_name=attr,
-                                source_field=f"{primary_alias}.{prim_col}",
+                                source_field=f"{owner_alias}.{owner_col}",
                                 target_field=f"{sec_s.alias}.{sec_col}",
                                 source_value=val_prim,
                                 target_value=val_sec,
@@ -2045,9 +2551,19 @@ def verify_multisource_datasets(
                                 target_type=t_t,
                                 difference_type=diff_type,
                                 reason_code=ReasonCode.FIELD_MISMATCH,
-                                message=f"Value in '{sec_s.alias}' differs from primary '{primary_alias}'",
+                                message=f"Value in '{sec_s.alias}' differs from owner '{owner_alias}'",
                             )
                         )
+
+                attr_compared_flags[attr] = attr_compared
+
+            # Batch 5/6: finalize explicit not-verified attributes and coverage counts.
+            unverified_list = sorted(unverified_attrs) or None
+            for attr, compared in attr_compared_flags.items():
+                if compared:
+                    attribute_comparisons_completed += 1
+                else:
+                    attributes_not_checked += 1
 
             # Evaluate Date Window Rules if configured
             if v_rules and v_rules.date_window_rules and prim_rec:
@@ -2123,6 +2639,8 @@ def verify_multisource_datasets(
                     ),
                     field_differences=[],
                     message="Records match identically across all sources.",
+                    lineage=fb_lineage,
+                    unverified_fields=unverified_list,
                 )
                 if include_identical:
                     results.append(item)
@@ -2150,6 +2668,8 @@ def verify_multisource_datasets(
                     ),
                     field_differences=diffs,
                     message="Status mismatch detected across sources.",
+                    lineage=fb_lineage,
+                    unverified_fields=unverified_list,
                 )
                 results.append(item)
                 discrepancies.append(item)
@@ -2186,6 +2706,8 @@ def verify_multisource_datasets(
                     ),
                     field_differences=diffs,
                     message=f"{len(diffs)} field difference(s) detected across sources.",
+                    lineage=fb_lineage,
+                    unverified_fields=unverified_list,
                 )
                 results.append(item)
                 discrepancies.append(item)
@@ -2259,8 +2781,21 @@ def verify_multisource_datasets(
         duplicate_target_keys_count=duplicate_target_keys_count,
         conflicting_duplicate_records=0,
         total_discrepancies=len(discrepancies),
+        fallback_matched_records=fallback_matched,
+        attribute_comparisons_completed=attribute_comparisons_completed,
+        attributes_not_checked=attributes_not_checked,
+        invalid_key_records=invalid_key_records,
         status="completed",
     )
+
+    from app.services.materiality_engine import (
+        compute_record_materiality,
+        compute_summary_materiality,
+    )
+
+    for r in results:
+        compute_record_materiality(r)
+    summary = compute_summary_materiality(results, discrepancies, summary)
 
     return summary, results, discrepancies, records_by_source, missing_by_source
 
@@ -2308,10 +2843,39 @@ def verify_multisource_project_files(
                 detail=f"Content for {s.alias} not found on disk.",
             )
 
-        if not s.excluded_row_indices:
-            s.excluded_row_indices = get_excluded_row_indices_for_file(path_resolved)
+        # Batch 9: resolve the effective worksheet BEFORE reading quarantine
+        # exclusions so sidecar data is matched to the worksheet actually parsed.
+        src_worksheet: Optional[str] = None
+        if s.sheet_name is not None:
+            if sf.file_type != "xlsx":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        f"Source '{s.alias}' specifies worksheet '{s.sheet_name}', but the "
+                        f"file is a CSV. Worksheet selection applies only to XLSX workbooks."
+                    ),
+                )
+            available = list_worksheet_names(path_resolved)
+            if s.sheet_name not in available:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        f"Source '{s.alias}': selected worksheet '{s.sheet_name}' was not "
+                        f"found in the workbook. Available worksheets: {available}."
+                    ),
+                )
+            src_worksheet = s.sheet_name
+        elif sf.file_type == "xlsx":
+            src_worksheet = get_active_worksheet_name(path_resolved)
 
-        recs, _, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, cfg)
+        if not s.excluded_row_indices:
+            s.excluded_row_indices = get_excluded_row_indices_for_file(path_resolved, src_worksheet)
+
+        src_cfg = cfg
+        if src_worksheet is not None:
+            src_cfg = cfg.model_copy(update={"selected_worksheet": src_worksheet})
+
+        recs, _, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, src_cfg)
         sources_records[s.alias] = recs
 
     summary, results, discrepancies, records_by_src, missing_by_src = verify_multisource_datasets(
@@ -2327,6 +2891,9 @@ def verify_multisource_project_files(
         include_identical=request.include_identical,
         status_rules=request.status_rules,
         rule_config=request.rule_config,
+        fallback_keys=request.fallback_keys,
+        multi_primary=request.multi_primary,
+        field_ownership=request.field_ownership,
     )
 
     return MultiSourceVerificationResponse(
@@ -2405,10 +2972,39 @@ def create_and_execute_multisource_run(
                         detail=f"Content for {s.alias} not found on disk.",
                     )
 
-                if not s.excluded_row_indices:
-                    s.excluded_row_indices = get_excluded_row_indices_for_file(path_resolved)
+                # Batch 9: resolve the effective worksheet BEFORE reading
+                # quarantine exclusions (same semantics as the stateless path).
+                src_worksheet: Optional[str] = None
+                if s.sheet_name is not None:
+                    if sf.file_type != "xlsx":
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail=(
+                                f"Source '{s.alias}' specifies worksheet '{s.sheet_name}', but the "
+                                f"file is a CSV. Worksheet selection applies only to XLSX workbooks."
+                            ),
+                        )
+                    available = list_worksheet_names(path_resolved)
+                    if s.sheet_name not in available:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail=(
+                                f"Source '{s.alias}': selected worksheet '{s.sheet_name}' was not "
+                                f"found in the workbook. Available worksheets: {available}."
+                            ),
+                        )
+                    src_worksheet = s.sheet_name
+                elif sf.file_type == "xlsx":
+                    src_worksheet = get_active_worksheet_name(path_resolved)
 
-                recs, _, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, cfg)
+                if not s.excluded_row_indices:
+                    s.excluded_row_indices = get_excluded_row_indices_for_file(path_resolved, src_worksheet)
+
+                src_cfg = cfg
+                if src_worksheet is not None:
+                    src_cfg = cfg.model_copy(update={"selected_worksheet": src_worksheet})
+
+                recs, _, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, src_cfg)
                 sources_records[s.alias] = recs
 
             summary, results, discrepancies, records_by_src, missing_by_src = verify_multisource_datasets(
@@ -2424,6 +3020,9 @@ def create_and_execute_multisource_run(
                 include_identical=request.include_identical,
                 status_rules=request.status_rules,
                 rule_config=request.rule_config,
+                fallback_keys=request.fallback_keys,
+                multi_primary=request.multi_primary,
+                field_ownership=request.field_ownership,
             )
 
             run.status = "completed"
@@ -2434,6 +3033,9 @@ def create_and_execute_multisource_run(
             run.completed_at = datetime.now(timezone.utc)
 
             for item in discrepancies:
+                sig = compute_exception_signature(item)
+                cid = generate_cluster_id(sig)
+                cname = generate_cluster_name(sig, item)[:255]
                 disc = VerificationDiscrepancy(
                     run_id=run.id,
                     match_status=item.match_status.value,
@@ -2441,6 +3043,8 @@ def create_and_execute_multisource_run(
                     key_values=item.key_values,
                     source_row_number=item.source_row_number,
                     target_row_number=item.target_row_number,
+                    source_row_numbers=item.source_row_numbers,
+                    target_row_numbers=item.target_row_numbers,
                     source_row_indices=item.source_row_indices,
                     source_records=item.source_records,
                     source_record=item.source_record,
@@ -2448,6 +3052,22 @@ def create_and_execute_multisource_run(
                     child_records=item.child_records,
                     aggregated_amount=item.aggregated_amount,
                     expected_amount=item.expected_amount,
+                    source_amount=item.source_amount,
+                    target_amount=item.target_amount,
+                    variance_amount=item.variance_amount,
+                    exposure_amount=item.exposure_amount,
+                    currency=item.currency or "USD",
+                    severity=item.severity or "medium",
+                    resolution_status=item.resolution_status or "unresolved",
+                    cluster_id=cid,
+                    cluster_name=cname,
+                    side_by_side=item.side_by_side,
+                    _reason_code=(
+                        item.reason_code.value
+                        if hasattr(item.reason_code, "value")
+                        else (str(item.reason_code) if item.reason_code else None)
+                    ),
+                    _confidence_score=item.confidence_score,
                     field_differences=[d.model_dump() for d in item.field_differences] if item.field_differences else None,
                     message=item.message,
                 )

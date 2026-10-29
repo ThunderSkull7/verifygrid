@@ -22,12 +22,16 @@ import type {
   RuleValidateRequest,
   RuleValidateResponse,
   SourceFile,
+  TemplateApplyRequest,
+  TemplateApplyResponse,
+  TemplateConfigurationV1,
   TokenResponse,
   User,
   VerificationRequest,
   VerificationResponse,
   VerificationRun,
   VerificationRunListResponse,
+  VerificationTemplate,
 } from '../types';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
@@ -87,8 +91,10 @@ class ApiClient {
 
     if (!response.ok) {
       let errorMessage = `HTTP ${response.status} ${response.statusText}`;
+      let errorDetail: unknown = null;
       try {
         const errorJson = await response.json();
+        errorDetail = errorJson?.detail ?? null;
         if (errorJson.detail) {
           if (typeof errorJson.detail === 'string') {
             errorMessage = errorJson.detail;
@@ -97,12 +103,17 @@ class ApiClient {
             errorMessage = errorJson.detail
               .map((d: any) => `${d.loc?.join('.')} : ${d.msg}`)
               .join(', ');
+          } else if (typeof errorJson.detail === 'object') {
+            // Structured backend detail (e.g. template apply validation report)
+            errorMessage = errorJson.detail.message || JSON.stringify(errorJson.detail);
           }
         }
       } catch {
         // Response was not JSON
       }
-      throw new Error(errorMessage);
+      const err = new Error(errorMessage) as Error & { detail?: unknown };
+      err.detail = errorDetail;
+      throw err;
     }
 
     // Check for empty body / 204
@@ -185,34 +196,87 @@ class ApiClient {
 
   async getFileProfile(
     projectId: string,
-    fileId: string
+    fileId: string,
+    worksheet?: string | null
   ): Promise<FileProfileSummary> {
+    const ws = worksheet ? `?worksheet=${encodeURIComponent(worksheet)}` : '';
     return this.request<FileProfileSummary>(
-      `/projects/${projectId}/files/${fileId}/profile`
+      `/projects/${projectId}/files/${fileId}/profile${ws}`
     );
   }
 
   async getFileQuarantine(
     projectId: string,
-    fileId: string
+    fileId: string,
+    worksheet?: string | null
   ): Promise<QuarantineListResponse> {
+    const ws = worksheet ? `?worksheet=${encodeURIComponent(worksheet)}` : '';
     return this.request<QuarantineListResponse>(
-      `/projects/${projectId}/files/${fileId}/quarantine`
+      `/projects/${projectId}/files/${fileId}/quarantine${ws}`
     );
   }
 
   async resolveQuarantine(
     projectId: string,
     fileId: string,
-    payload: QuarantineResolutionRequest
+    payload: QuarantineResolutionRequest,
+    worksheet?: string | null
   ): Promise<QuarantineResolutionResponse> {
+    const ws = worksheet ? `?worksheet=${encodeURIComponent(worksheet)}` : '';
     return this.request<QuarantineResolutionResponse>(
-      `/projects/${projectId}/files/${fileId}/quarantine/resolve`,
+      `/projects/${projectId}/files/${fileId}/quarantine/resolve${ws}`,
       {
         method: 'POST',
         body: JSON.stringify(payload),
       }
     );
+  }
+
+  // --- Template Endpoints (Batch 11, personal-only) ---
+  async listTemplates(mode?: 'organization'): Promise<VerificationTemplate[]> {
+    const q = mode ? `?mode=${encodeURIComponent(mode)}` : '';
+    return this.request<VerificationTemplate[]>(`/templates${q}`);
+  }
+
+  async createTemplate(payload: {
+    name: string;
+    description?: string | null;
+    mode: 'organization';
+    visibility?: 'personal';
+    configuration: TemplateConfigurationV1;
+  }): Promise<VerificationTemplate> {
+    return this.request<VerificationTemplate>('/templates', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getTemplate(templateId: string): Promise<VerificationTemplate> {
+    return this.request<VerificationTemplate>(`/templates/${templateId}`);
+  }
+
+  async updateTemplate(
+    templateId: string,
+    payload: { name?: string; description?: string | null; visibility?: 'personal'; configuration?: TemplateConfigurationV1 }
+  ): Promise<VerificationTemplate> {
+    return this.request<VerificationTemplate>(`/templates/${templateId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteTemplate(templateId: string): Promise<void> {
+    await this.request<void>(`/templates/${templateId}`, { method: 'DELETE' });
+  }
+
+  async applyTemplate(
+    templateId: string,
+    payload: TemplateApplyRequest
+  ): Promise<TemplateApplyResponse> {
+    return this.request<TemplateApplyResponse>(`/templates/${templateId}/apply`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   // --- Verification Endpoints ---

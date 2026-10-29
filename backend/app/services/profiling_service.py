@@ -39,7 +39,13 @@ from app.schemas.profiling import (
     QuarantinedRecord,
     ResolutionAction,
 )
-from app.services.preprocessing import extract_dataset_records, read_csv_rows, read_xlsx_rows
+from app.services.preprocessing import (
+    extract_dataset_records,
+    get_active_worksheet_name,
+    list_worksheet_names,
+    read_csv_rows,
+    read_xlsx_rows,
+)
 from app.services.project_service import get_project_by_id
 from rapidfuzz import fuzz
 from app.utils.normalization import (
@@ -106,14 +112,104 @@ def _get_quarantine_sidecar_path(storage_path: Path) -> Path:
     return storage_path.with_name(storage_path.name + ".quarantine.json")
 
 
-def get_excluded_row_indices_for_file(storage_path: Path) -> List[int]:
-    """Retrieve 1-based row indices marked for exclusion in quarantine sidecar."""
+def _sidecar_worksheet_matches(
+    sidecar_data: Optional[Dict[str, Any]],
+    requested_worksheet: Optional[str],
+    storage_path: Path,
+) -> bool:
+    """
+    Batch 9: decide whether a sidecar's contents apply to the requested worksheet.
+
+    - Worksheet-associated sidecars: apply only when the name matches exactly.
+      A different selection (or no selection) must never reuse them.
+    - Legacy sidecars (written before worksheet association): they were created
+      against the workbook's ACTIVE sheet (the only pre-Batch 9 parse target),
+      so they apply when the caller makes no selection, or when the caller
+      explicitly selects that same active sheet. Any other selection must not
+      reuse them. This preserves pre-Batch 9 behavior while making stale
+      cross-worksheet reuse impossible.
+    """
+    if sidecar_data is None:
+        return False
+    if "worksheet" in sidecar_data:
+        return sidecar_data.get("worksheet") == requested_worksheet
+    # Legacy sidecar:
+    if requested_worksheet is None:
+        return True
+    active = get_active_worksheet_name(storage_path)
+    return active is not None and requested_worksheet == active
+
+
+def _read_quarantine_sidecar(storage_path: Path) -> Optional[Dict[str, Any]]:
     q_path = _get_quarantine_sidecar_path(storage_path)
     if not q_path.exists():
-        return []
+        return None
     try:
-        data = json.loads(q_path.read_text(encoding="utf-8"))
-        resolutions = data.get("resolutions", {})
+        return json.loads(q_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _worksheet_resolution_key(worksheet: Optional[str]) -> str:
+    """JSON object key for a worksheet association (None -> '' for CSV)."""
+    return worksheet or ""
+
+
+def _get_worksheet_resolution_entry(
+    sidecar_data: Optional[Dict[str, Any]],
+    requested_worksheet: Optional[str],
+    storage_path: Path,
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Batch 14: return the (resolutions, notes) that apply to a worksheet.
+
+    Sidecars may hold resolutions for several worksheets under
+    `worksheet_resolutions`, keyed by worksheet name ('' = worksheet-less CSV).
+    A worksheet with no stored entry never reuses another worksheet's map.
+    Legacy/current single-worksheet sidecars keep their documented association
+    rules (`_sidecar_worksheet_matches`).
+    """
+    if sidecar_data is None:
+        return {}, {}
+    archive = sidecar_data.get("worksheet_resolutions")
+    if isinstance(archive, dict):
+        entry = archive.get(_worksheet_resolution_key(requested_worksheet))
+        if not isinstance(entry, dict):
+            return {}, {}
+        resolutions = entry.get("resolutions") or {}
+        notes = entry.get("notes") or {}
+        return (
+            resolutions if isinstance(resolutions, dict) else {},
+            notes if isinstance(notes, dict) else {},
+        )
+    if _sidecar_worksheet_matches(sidecar_data, requested_worksheet, storage_path):
+        resolutions = sidecar_data.get("resolutions") or {}
+        notes = sidecar_data.get("notes") or {}
+        return (
+            resolutions if isinstance(resolutions, dict) else {},
+            notes if isinstance(notes, dict) else {},
+        )
+    return {}, {}
+
+
+def get_excluded_row_indices_for_file(
+    storage_path: Path,
+    worksheet: Optional[str] = None,
+) -> List[int]:
+    """
+    Retrieve 1-based row indices marked for exclusion in quarantine sidecar.
+
+    Batch 9: worksheet-aware. When `worksheet` is provided, only sidecar
+    resolutions associated with that exact worksheet apply; resolutions saved
+    for a different worksheet are never reused. When `worksheet` is None
+    (legacy callers / CSV), legacy sidecars (no worksheet key) still apply so
+    existing behavior is preserved.
+    """
+    data = _read_quarantine_sidecar(storage_path)
+    if data is None:
+        return []
+    resolutions, _notes = _get_worksheet_resolution_entry(data, worksheet, storage_path)
+    try:
         return [
             int(row_idx)
             for row_idx, action in resolutions.items()
@@ -412,9 +508,19 @@ def profile_and_persist_source_file(
     db: Session,
     project_id: uuid.UUID,
     file_id: uuid.UUID,
+    worksheet: Optional[str] = None,
     current_user: Optional[User] = None,
 ) -> Tuple[FileProfileSummary, List[QuarantinedRecord]]:
-    """Extract records from source file, execute profiling, and persist profile sidecar."""
+    """Extract records from source file, execute profiling, and persist profile sidecar.
+
+    Batch 9: worksheet-aware. `worksheet` selects which XLSX worksheet to parse
+    (exact name; unknown names fail clearly in read_xlsx_rows — never a silent
+    fallback). For XLSX without an explicit selection the workbook's active
+    sheet is used AND recorded in the sidecar so profile/quarantine data is
+    always associated with the worksheet it was computed from. CSV files carry
+    no worksheet association (None). Sidecar resolutions are only applied when
+    their worksheet association matches this selection.
+    """
     project = get_project_by_id(db, project_id, current_user=current_user)
     if project is None:
         raise HTTPException(
@@ -440,6 +546,23 @@ def profile_and_persist_source_file(
         )
 
     cfg = PreprocessingConfig()
+    # Batch 9: resolve the effective worksheet for this profiling pass.
+    effective_worksheet: Optional[str] = None
+    if source_file.file_type.lower() == "xlsx":
+        effective_worksheet = worksheet if worksheet is not None else get_active_worksheet_name(path_resolved)
+        if effective_worksheet is not None:
+            # Unknown worksheet names must fail clearly — never a silent
+            # fallback to the active sheet or an empty profile.
+            available = list_worksheet_names(path_resolved)
+            if effective_worksheet not in available:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        f"Selected worksheet '{effective_worksheet}' was not found in the "
+                        f"workbook. Available worksheets: {available}."
+                    ),
+                )
+            cfg = cfg.model_copy(update={"selected_worksheet": effective_worksheet})
     null_set = set(v.strip().lower() for v in cfg.null_values)
 
     (
@@ -476,13 +599,15 @@ def profile_and_persist_source_file(
         raw_rows_with_mismatch=shifted_rows,
     )
 
-    # Apply existing quarantine resolutions if already saved
-    q_path = _get_quarantine_sidecar_path(path_resolved)
-    if q_path.exists():
+    # Apply existing quarantine resolutions if already saved. Batch 9/14: only
+    # resolutions stored for THIS worksheet apply; each worksheet keeps its own
+    # map, and stale resolutions from another worksheet are never reused.
+    q_sidecar = _read_quarantine_sidecar(path_resolved)
+    resolutions, notes = _get_worksheet_resolution_entry(
+        q_sidecar, effective_worksheet, path_resolved
+    )
+    if resolutions:
         try:
-            q_data = json.loads(q_path.read_text(encoding="utf-8"))
-            resolutions = q_data.get("resolutions", {})
-            notes = q_data.get("notes", {})
             for q in quarantined:
                 r_key = str(q.source_row_index)
                 if r_key in resolutions:
@@ -498,10 +623,12 @@ def profile_and_persist_source_file(
     summary.impact_preview.excluded_rows_count = len(excluded_rows)
     summary.impact_preview.eligible_rows_count = max(0, summary.total_rows - len(excluded_rows))
 
-    # Persist profile sidecar
+    # Persist profile sidecar (Batch 9: keyed to the effective worksheet)
+    profile_payload = summary.model_dump(mode="json")
+    profile_payload["worksheet"] = effective_worksheet
     profile_path = _get_profile_sidecar_path(path_resolved)
     profile_path.write_text(
-        json.dumps(summary.model_dump(mode="json"), indent=2),
+        json.dumps(profile_payload, indent=2),
         encoding="utf-8",
     )
 
@@ -512,10 +639,13 @@ def get_file_profile(
     db: Session,
     project_id: uuid.UUID,
     file_id: uuid.UUID,
+    worksheet: Optional[str] = None,
     current_user: Optional[User] = None,
 ) -> FileProfileSummary:
-    """Retrieve or compute file profile summary."""
-    summary, _ = profile_and_persist_source_file(db, project_id, file_id, current_user)
+    """Retrieve or compute file profile summary (Batch 9: worksheet-aware)."""
+    summary, _ = profile_and_persist_source_file(
+        db, project_id, file_id, worksheet=worksheet, current_user=current_user
+    )
     return summary
 
 
@@ -523,10 +653,13 @@ def get_file_quarantine(
     db: Session,
     project_id: uuid.UUID,
     file_id: uuid.UUID,
+    worksheet: Optional[str] = None,
     current_user: Optional[User] = None,
 ) -> QuarantineListResponse:
     """Retrieve list of quarantined records with current resolutions and impact."""
-    summary, quarantined = profile_and_persist_source_file(db, project_id, file_id, current_user)
+    summary, quarantined = profile_and_persist_source_file(
+        db, project_id, file_id, worksheet=worksheet, current_user=current_user
+    )
     return QuarantineListResponse(
         file_id=file_id,
         total_quarantined=len(quarantined),
@@ -540,6 +673,7 @@ def resolve_quarantine_records(
     project_id: uuid.UUID,
     file_id: uuid.UUID,
     request: QuarantineResolutionRequest,
+    worksheet: Optional[str] = None,
     current_user: Optional[User] = None,
 ) -> QuarantineResolutionResponse:
     """
@@ -559,15 +693,46 @@ def resolve_quarantine_records(
     path_resolved = Path(source_file.storage_path).resolve()
     q_path = _get_quarantine_sidecar_path(path_resolved)
 
-    existing_resolutions: Dict[str, str] = {}
-    existing_notes: Dict[str, str] = {}
-    if q_path.exists():
-        try:
-            q_data = json.loads(q_path.read_text(encoding="utf-8"))
-            existing_resolutions = q_data.get("resolutions", {})
-            existing_notes = q_data.get("notes", {})
-        except Exception:
-            pass
+    # Batch 9: resolve the effective worksheet for this resolution pass so the
+    # sidecar is associated with the worksheet it was created against.
+    effective_worksheet: Optional[str] = None
+    if source_file.file_type.lower() == "xlsx":
+        effective_worksheet = worksheet if worksheet is not None else get_active_worksheet_name(path_resolved)
+
+    # Batch 14: keep a per-worksheet archive so resolving one worksheet never
+    # discards another worksheet's resolutions. Single-worksheet sidecars from
+    # Batch 9 (and legacy worksheet-less sidecars) are migrated in place under
+    # the worksheet they belong to. The top-level worksheet/resolutions/notes
+    # fields mirror the latest pass for backward compatibility.
+    archive: Dict[str, Dict[str, Dict[str, str]]] = {}
+    q_sidecar = _read_quarantine_sidecar(path_resolved)
+    if q_sidecar is not None:
+        stored_archive = q_sidecar.get("worksheet_resolutions")
+        if isinstance(stored_archive, dict):
+            for stored_ws, entry in stored_archive.items():
+                if isinstance(entry, dict):
+                    archive[str(stored_ws)] = {
+                        "resolutions": dict(entry.get("resolutions") or {}),
+                        "notes": dict(entry.get("notes") or {}),
+                    }
+        else:
+            if "worksheet" in q_sidecar:
+                previous_worksheet = q_sidecar.get("worksheet")
+            elif source_file.file_type.lower() == "xlsx":
+                previous_worksheet = get_active_worksheet_name(path_resolved)
+            else:
+                previous_worksheet = None
+            archive[_worksheet_resolution_key(previous_worksheet)] = {
+                "resolutions": dict(q_sidecar.get("resolutions") or {}),
+                "notes": dict(q_sidecar.get("notes") or {}),
+            }
+
+    current_entry = archive.setdefault(
+        _worksheet_resolution_key(effective_worksheet),
+        {"resolutions": {}, "notes": {}},
+    )
+    existing_resolutions = current_entry["resolutions"]
+    existing_notes = current_entry["notes"]
 
     for item in request.resolutions:
         r_key = str(item.source_row_index)
@@ -575,13 +740,17 @@ def resolve_quarantine_records(
         if item.note:
             existing_notes[r_key] = item.note
 
-    # Save to quarantine sidecar (raw source file is untouched / immutable)
+    # Save to quarantine sidecar (raw source file is untouched / immutable).
+    # Batch 9/14: each resolution stays associated with the worksheet it was
+    # made against; switching worksheets can never reuse another sheet's rows.
     q_path.write_text(
         json.dumps(
             {
                 "file_id": str(file_id),
+                "worksheet": effective_worksheet,
                 "resolutions": existing_resolutions,
                 "notes": existing_notes,
+                "worksheet_resolutions": archive,
             },
             indent=2,
         ),
@@ -589,7 +758,9 @@ def resolve_quarantine_records(
     )
 
     # Re-fetch profile & quarantine with updated resolutions applied
-    summary, quarantined = profile_and_persist_source_file(db, project_id, file_id, current_user)
+    summary, quarantined = profile_and_persist_source_file(
+        db, project_id, file_id, worksheet=effective_worksheet, current_user=current_user
+    )
 
     excluded = [
         int(k) for k, v in existing_resolutions.items() if v == ResolutionAction.EXCLUDE.value

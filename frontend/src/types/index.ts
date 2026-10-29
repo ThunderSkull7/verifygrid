@@ -48,6 +48,8 @@ export interface PreprocessingConfig {
   normalize_numbers?: boolean;
   identifier_columns?: string[];
   max_rows?: number;
+  /** Batch 7: exact worksheet name for XLSX preprocessing (see batch 7 report). */
+  selected_worksheet?: string | null;
 }
 
 export interface ValidationIssue {
@@ -81,6 +83,11 @@ export interface PreprocessingResult {
   duplicate_record_row_numbers: number[][];
   issues: ValidationIssue[];
   preview_rows: Record<string, any>[];
+  /** Batch 7: for XLSX workbooks only — worksheet names in workbook order for
+   *  explicit selection. null/undefined for CSV files. */
+  sheet_names?: string[] | null;
+  /** Batch 7: the worksheet this preprocessing run parsed (XLSX only; null = active sheet). */
+  selected_worksheet?: string | null;
 }
 
 export type MatchStatus =
@@ -138,6 +145,9 @@ export interface VerificationResultItem {
   source_file_id?: string | null;
   target_file_id?: string | null;
   lineage?: Record<string, any> | null;
+  /** Batch 5: attributes configured but NOT compared for this record (owner blank,
+   *  or attribute not carried by a source) — explicitly not verified. */
+  unverified_fields?: string[] | null;
   source_row_indices?: Record<string, number | null> | null;
   source_records?: Record<string, Record<string, any> | null> | null;
   missing_in_sources?: string[] | null;
@@ -167,6 +177,17 @@ export interface VerificationSummary {
   duplicate_target_keys_count: number;
   conflicting_duplicate_records?: number;
   total_discrepancies: number;
+  /** Batch 4: records matched via a fallback key after primary-key matching failed. */
+  fallback_matched_records?: number;
+  /** Batch 6: (record, attribute) pairs with ≥1 executed comparison. */
+  attribute_comparisons_completed?: number;
+  /** Batch 6: (record, attribute) pairs with no executed comparison (owner blank,
+   *  attribute unavailable). completed + not_checked = all-present, non-duplicate
+   *  records × configured compare attributes. */
+  attributes_not_checked?: number;
+  /** Batch 8: records with missing/blank/incomplete identity keys — surfaced as
+   *  needs_review, never counted as matches or confirmed duplicates. */
+  invalid_key_records?: number;
   status: string;
 }
 
@@ -365,15 +386,57 @@ export interface SourceDefinition {
   alias: string;
   file_id: string;
   is_primary?: boolean;
+  /** Batch 2: optional user-editable display label (backend max 120 chars, trimmed). */
+  label?: string | null;
   key_columns: string[];
   field_mapping?: Record<string, string>;
   excluded_row_indices?: number[];
+  /** Batch 7: exact worksheet name for XLSX sources (undefined/None = legacy
+   *  active-sheet behavior). Ignored by the engine for CSV sources. */
+  sheet_name?: string | null;
+}
+
+/** Batch 3 (organization mode): per-file column mapping state.
+ *  Maps a canonical/unified attribute name to the source column carrying it,
+ *  with a transparent confirmation state. Only 'suggested' (exact normalized
+ *  match) and 'confirmed' mappings are sent to the engine; 'needs_confirmation'
+ *  suggestions are never auto-submitted. */
+export type MappingState = 'suggested' | 'needs_confirmation' | 'confirmed';
+
+export interface ColumnMappingEntry {
+  column: string | null;
+  state: MappingState;
+}
+
+/** Mapping state per file: canonical attribute -> column entry. */
+export type FileColumnMappings = Record<string, ColumnMappingEntry | undefined>;
+/** A dataset held in wizard state for the active session. */
+export interface UploadedDataset {
+  id: string;
+  name: string;
+  /** Editable, institution-friendly display label (defaults derived from the filename). */
+  label: string;
+  /** Explicit source role. Sources of truth for matching remains backend-validated
+   *  `is_primary` inside SourceDefinition (exactly one primary until Batch 5). */
+  isPrimary: boolean;
+  profile?: PreprocessingResult;
+  /** Batch 7: user-selected worksheet for XLSX sources. Must be set (org mode)
+   *  before the source is eligible for verification. */
+  selectedSheet?: string | null;
 }
 
 export interface MultiSourceVerificationRequest {
   sources: SourceDefinition[];
   unified_keys: string[];
   compare_attributes?: string[] | null;
+  /** Batch 4 (organization mode): ordered fallback matching keys. Each entry is a
+   *  list of canonical attribute names (composite supported), resolved per source
+   *  through field_mapping. Tried in order when the primary key cannot match. */
+  fallback_keys?: string[][] | null;
+  /** Batch 5 (organization mode): explicit multi-primary opt-in with per-field
+   *  ownership ({unified_attribute -> owner alias}). Legacy requests omit both. */
+  multi_primary?: boolean;
+  field_ownership?: Record<string, string> | null;
   ignore_attributes?: string[];
   numeric_tolerance?: number;
   ignore_whitespace?: boolean;
@@ -568,3 +631,82 @@ export interface RulePreviewResponse {
 }
 
 
+
+// ===================== Batch 11: Verification Templates =====================
+
+/** Reusable per-source slot of a template. Deliberately has no file binding,
+ *  no row indices, and no quarantine state — templates store configuration only. */
+export interface TemplateSourceSlot {
+  alias: string;
+  label?: string | null;
+  is_primary: boolean;
+  key_columns: string[];
+  field_mapping: Record<string, string>;
+  /** Batch 7 worksheet selection; revalidated against every new XLSX upload. */
+  sheet_name?: string | null;
+}
+
+/** Versioned template configuration snapshot (organization mode, schema v1). */
+export interface TemplateConfigurationV1 {
+  version: 1;
+  sources: TemplateSourceSlot[];
+  unified_keys: string[];
+  compare_attributes?: string[] | null;
+  ignore_attributes?: string[];
+  numeric_tolerance?: number;
+  ignore_whitespace?: boolean;
+  ignore_case?: boolean;
+  include_identical?: boolean;
+  fallback_keys?: string[][] | null;
+  multi_primary?: boolean;
+  field_ownership?: Record<string, string> | null;
+}
+
+export type TemplateMode = 'organization';
+export type TemplateVisibility = 'personal';
+
+export interface VerificationTemplate {
+  id: string;
+  name: string;
+  description?: string | null;
+  mode: TemplateMode;
+  /** Personal-only launch: organization sharing is disabled (deny-by-default). */
+  visibility: TemplateVisibility;
+  config_version: number;
+  configuration: TemplateConfigurationV1;
+  source_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TemplateApplySourceBinding {
+  slot: string;
+  file_id: string;
+}
+
+export interface TemplateApplyRequest {
+  project_id: string;
+  sources: TemplateApplySourceBinding[];
+}
+
+export interface TemplateValidationIssue {
+  slot?: string | null;
+  field?: string | null;
+  message: string;
+}
+
+export interface TemplateValidationReport {
+  blocking: boolean;
+  issues: TemplateValidationIssue[];
+  warnings: string[];
+}
+
+export interface TemplateApplyResponse {
+  template_id: string;
+  project_id: string;
+  mode: TemplateMode;
+  /** Effective MultiSourceVerificationRequest (file IDs substituted), ready for
+   *  the existing verification endpoints. */
+  effective_request: MultiSourceVerificationRequest;
+  validation_report: TemplateValidationReport;
+}

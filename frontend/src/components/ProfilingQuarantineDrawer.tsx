@@ -27,6 +27,10 @@ interface ProfilingQuarantineDrawerProps {
   fileId: string;
   filename: string;
   isOpen: boolean;
+  /** Batch 9: worksheet the drawer is scoped to. Profile/quarantine data and
+   *  resolutions are fetched and saved for exactly this worksheet, so switching
+   *  worksheets can never reuse stale row-index resolutions. */
+  worksheet?: string | null;
   onClose: () => void;
   onResolutionsUpdated?: () => void;
 }
@@ -36,6 +40,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
   fileId,
   filename,
   isOpen,
+  worksheet,
   onClose,
   onResolutionsUpdated,
 }) => {
@@ -62,8 +67,8 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
       setSuccessMessage(null);
       try {
         const [prof, quar] = await Promise.all([
-          api.getFileProfile(projectId, fileId),
-          api.getFileQuarantine(projectId, fileId),
+          api.getFileProfile(projectId, fileId, worksheet),
+          api.getFileQuarantine(projectId, fileId, worksheet),
         ]);
         if (!cancelled) {
           setProfile(prof);
@@ -91,7 +96,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
     return () => {
       cancelled = true;
     };
-  }, [isOpen, projectId, fileId]);
+  }, [isOpen, projectId, fileId, worksheet]);
 
   if (!isOpen) return null;
 
@@ -130,7 +135,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
     }));
 
     try {
-      const resp = await api.resolveQuarantine(projectId, fileId, { resolutions: items });
+      const resp = await api.resolveQuarantine(projectId, fileId, { resolutions: items }, worksheet);
       setQuarantineData((prev) =>
         prev
           ? {

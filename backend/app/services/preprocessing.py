@@ -145,9 +145,54 @@ def read_csv_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple
     return raw_headers, data_rows, issues
 
 
-def read_xlsx_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple[int, List[Any]]], List[ValidationIssue]]:
+def list_worksheet_names(file_path: Path) -> List[str]:
     """
-    Safely parse first sheet of XLSX file using openpyxl in read_only mode.
+    Batch 7: enumerate worksheet names from an XLSX workbook in workbook order.
+
+    Raises ValueError with an actionable message when the workbook cannot be read.
+    Only reads workbook metadata — never worksheet contents.
+    """
+    try:
+        workbook = openpyxl.load_workbook(filename=str(file_path), read_only=True, data_only=True)
+    except Exception as exc:
+        raise ValueError(
+            "Unable to read XLSX spreadsheet. The file may be corrupt or encrypted."
+        ) from exc
+    try:
+        return list(workbook.sheetnames)
+    finally:
+        workbook.close()
+
+
+def get_active_worksheet_name(file_path: Path) -> Optional[str]:
+    """
+    Batch 9: resolve the worksheet name that legacy (Batch 7) parsing would use
+    for an XLSX workbook — i.e. the workbook's active sheet. Returns None for
+    any failure or non-XLSX context, meaning "no worksheet association".
+    """
+    try:
+        workbook = openpyxl.load_workbook(filename=str(file_path), read_only=True, data_only=True)
+    except Exception:
+        return None
+    try:
+        return workbook.active.title if workbook.active is not None else None
+    finally:
+        workbook.close()
+
+
+def read_xlsx_rows(
+    file_path: Path,
+    max_rows: int,
+    sheet_name: Optional[str] = None,
+) -> Tuple[List[str], List[Tuple[int, List[Any]]], List[ValidationIssue]]:
+    """
+    Safely parse an XLSX file using openpyxl in read_only mode.
+
+    Batch 7: when sheet_name is provided, the EXACT named worksheet is parsed
+    (never a fallback); an unknown name yields an actionable worksheet_not_found
+    error. When sheet_name is None, legacy behavior applies: the workbook's
+    active sheet is used.
+
     Returns:
         - raw_headers: List of header strings from first row
         - data_rows: List of (1-based source_row_num, [cell_values])
@@ -168,7 +213,23 @@ def read_xlsx_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tupl
         return [], [], issues
 
     try:
-        sheet = workbook.active
+        if sheet_name is not None:
+            # Batch 7: explicit selection — exact name match, never implicit.
+            if sheet_name not in workbook.sheetnames:
+                issues.append(
+                    ValidationIssue(
+                        level="error",
+                        issue_type="worksheet_not_found",
+                        message=(
+                            f"Selected worksheet '{sheet_name}' was not found in this workbook. "
+                            f"Available worksheets: {workbook.sheetnames}."
+                        ),
+                    )
+                )
+                return [], [], issues
+            sheet = workbook[sheet_name]
+        else:
+            sheet = workbook.active
         if sheet is None:
             issues.append(
                 ValidationIssue(
@@ -229,6 +290,7 @@ def extract_dataset_records(
     file_path: Path,
     file_type: str,
     config: Optional[PreprocessingConfig] = None,
+    sheet_name: Optional[str] = None,
 ) -> Tuple[List[Tuple[int, Dict[str, Any]]], List[ColumnMetadata], Dict[str, str], List[List[int]], List[int], List[ValidationIssue], int]:
     """
     Core parsing, cleaning, and normalization logic returning all processed records.
@@ -251,7 +313,10 @@ def extract_dataset_records(
     if file_type == "csv":
         raw_headers, data_rows, issues = read_csv_rows(file_path, config.max_rows)
     elif file_type == "xlsx":
-        raw_headers, data_rows, issues = read_xlsx_rows(file_path, config.max_rows)
+        # Batch 7: explicit sheet_name argument takes precedence over the config
+        # value; both are exact-name selections (no implicit fallback either way).
+        effective_sheet = sheet_name if sheet_name is not None else config.selected_worksheet
+        raw_headers, data_rows, issues = read_xlsx_rows(file_path, config.max_rows, sheet_name=effective_sheet)
     else:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -613,6 +678,17 @@ def preprocess_source_file(
         db.rollback()
         raise
 
+    # Batch 7: enumerate worksheets for XLSX so the frontend can present an
+    # explicit selection. Metadata only — contents are never read here.
+    sheet_names: Optional[List[str]] = None
+    if source_file.file_type == "xlsx":
+        try:
+            sheet_names = list_worksheet_names(resolved_path)
+        except ValueError:
+            # Corrupt workbooks already surface a corrupted_file error via issues;
+            # keep the existing error path rather than masking it.
+            sheet_names = None
+
     return PreprocessingResultResponse(
         source_file_id=source_file.id,
         project_id=project.id,
@@ -627,4 +703,10 @@ def preprocess_source_file(
         duplicate_record_row_numbers=duplicate_record_row_numbers,
         issues=issues,
         preview_rows=preview_rows,
+        sheet_names=sheet_names,
+        selected_worksheet=(
+            (config or PreprocessingConfig()).selected_worksheet
+            if source_file.file_type == "xlsx"
+            else None
+        ),
     )

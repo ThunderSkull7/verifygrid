@@ -1,9 +1,9 @@
 import React from 'react';
 import { useAuth } from '../context/useAuth';
-import { ShieldCheck, FolderKanban, CheckCircle2, History, LogOut, X } from 'lucide-react';
+import { ShieldCheck, FolderKanban, Building2, Landmark, History, LogOut, X } from 'lucide-react';
 import { AppearanceControl } from './AppearanceControl';
 
-export type AppTab = 'projects' | 'verify' | 'runs';
+export type AppTab = 'projects' | 'verify' | 'financial' | 'runs';
 
 interface SidebarProps {
   currentTab: AppTab;
@@ -13,12 +13,6 @@ interface SidebarProps {
   showClose?: boolean;
 }
 
-const NAV_ITEMS: { tab: AppTab; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
-  { tab: 'projects', label: 'Projects', icon: FolderKanban },
-  { tab: 'verify', label: 'Reconciliation', icon: CheckCircle2 },
-  { tab: 'runs', label: 'Audit History', icon: History },
-];
-
 export const Sidebar: React.FC<SidebarProps> = ({
   currentTab,
   onSelectTab,
@@ -26,6 +20,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onClose,
   showClose = false,
 }) => {
+  const brandSubtitle = currentTab === 'financial' ? 'Financial Auditing' : 'Data Reconciliation';
   const { user, logout } = useAuth();
 
   const getInitials = (name?: string | null, email?: string) => {
@@ -49,7 +44,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
         <div className="brand-text">
           <span className="brand-title">VerifyGrid</span>
-          <span className="brand-subtitle">Data Reconciliation</span>
+          <span className="brand-subtitle">{brandSubtitle}</span>
         </div>
         {showClose && (
           <button
@@ -65,18 +60,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       <nav className="sidebar-nav" aria-label="Primary navigation">
         <span className="nav-section-label">Workspace</span>
-        {NAV_ITEMS.map((item) => (
-          <button
-            key={item.tab}
-            type="button"
-            className={`nav-link ${currentTab === item.tab ? 'active' : ''}`}
-            onClick={() => onSelectTab(item.tab)}
-            aria-current={currentTab === item.tab ? 'page' : undefined}
-          >
-            <item.icon size={18} />
-            <span>{item.label}</span>
-          </button>
-        ))}
+        <button
+          type="button"
+          className={`nav-link ${currentTab === 'projects' ? 'active' : ''}`}
+          onClick={() => onSelectTab('projects')}
+          aria-current={currentTab === 'projects' ? 'page' : undefined}
+        >
+          <FolderKanban size={18} />
+          <span>Projects</span>
+        </button>
+        <button
+          type="button"
+          className={`nav-link ${currentTab === 'verify' ? 'active' : ''}`}
+          onClick={() => onSelectTab('verify')}
+          aria-current={currentTab === 'verify' ? 'page' : undefined}
+        >
+          <Building2 size={18} />
+          <span>Organization Verification</span>
+        </button>
+        <button
+          type="button"
+          className={`nav-link ${currentTab === 'financial' ? 'active' : ''}`}
+          onClick={() => onSelectTab('financial')}
+          aria-current={currentTab === 'financial' ? 'page' : undefined}
+        >
+          <Landmark size={18} />
+          <span>Financial Auditing</span>
+        </button>
+        <button
+          type="button"
+          className={`nav-link ${currentTab === 'runs' ? 'active' : ''}`}
+          onClick={() => onSelectTab('runs')}
+          aria-current={currentTab === 'runs' ? 'page' : undefined}
+        >
+          <History size={18} />
+          <span>Audit History</span>
+        </button>
 
         {selectedProjectName && (
           <div className="sidebar-project">

@@ -28,6 +28,12 @@ class User(Base):
         String(255),
         nullable=True,
     )
+    role: Mapped[str] = mapped_column(
+        String(50),
+        default="MAKER",
+        server_default="MAKER",
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

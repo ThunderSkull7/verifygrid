@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -17,6 +17,18 @@ class UserRegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", description="User email address")
     password: str = Field(min_length=8, max_length=128, description="Plaintext password (min 8 chars)")
     full_name: Optional[str] = Field(default=None, max_length=255, description="User full display name")
+
+    # P0-1: role is never accepted from the registration payload. Rejecting
+    # unknown fields makes escalation attempts fail closed with 422.
+    model_config = ConfigDict(extra="forbid")
+
+
+class UserRoleUpdateRequest(BaseModel):
+    """Admin-only role elevation payload (exact uppercase role required)."""
+
+    role: Literal["MAKER", "CHECKER", "ADMIN", "VIEWER"] = Field(
+        description="Target role; must be one of MAKER, CHECKER, ADMIN, VIEWER.",
+    )
 
 
 class UserLoginRequest(BaseModel):
@@ -32,6 +44,7 @@ class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     full_name: Optional[str] = None
+    role: str = "MAKER"
     created_at: datetime
     updated_at: datetime
 

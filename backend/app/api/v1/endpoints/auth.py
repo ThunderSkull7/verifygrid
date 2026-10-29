@@ -38,6 +38,9 @@ def register(
         email=normalized_email,
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name.strip() if payload.full_name else None,
+        # P0-1: public registration always creates a MAKER. The role is never
+        # read from the request body, query string, header, cookie, or token.
+        role="MAKER",
     )
     db.add(user)
     db.commit()

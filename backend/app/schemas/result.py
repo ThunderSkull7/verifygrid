@@ -66,6 +66,10 @@ class ReasonCode(str, Enum):
     OVERPAYMENT = "OVERPAYMENT"
     UNMATCHED_SPLIT_RECORD = "UNMATCHED_SPLIT_RECORD"
     DUPLICATE_RECEIPT = "DUPLICATE_RECEIPT"
+    # Deployed governance/materiality reason codes retained for wire parity.
+    TRAILING_WHITESPACE = "TRAILING_WHITESPACE"
+    VALUE_MISMATCH = "VALUE_MISMATCH"
+    TAX_CODE_MISMATCH = "TAX_CODE_MISMATCH"
 
 
 class FieldDifference(BaseModel):
@@ -133,6 +137,14 @@ class VerificationResultItem(BaseModel):
     lineage: Optional[Dict[str, Any]] = Field(
         default=None, description="Detailed record provenance and key trace"
     )
+    unverified_fields: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Batch 5: unified attributes present in the configuration but NOT compared for "
+            "this record (e.g. owner value blank in multi-primary mode, or attribute not "
+            "carried by a source). Explicitly distinguishes not-checked from verified."
+        ),
+    )
     source_row_indices: Optional[Dict[str, Optional[int]]] = Field(
         default=None,
         description="Lineage row indices across all participating sources: {'source_a': 12, 'source_b': 14, 'source_c': 19}",
@@ -171,6 +183,44 @@ class VerificationResultItem(BaseModel):
         default=None,
         description="Expected parent total amount in split-payment reconciliation",
     )
+    # Financial materiality, clustering, assignment, and review state.
+    source_amount: Optional[float] = Field(
+        default=None,
+        description="Reconciled or claimed monetary value from source dataset",
+    )
+    target_amount: Optional[float] = Field(
+        default=None,
+        description="Reconciled or matched monetary value from target dataset",
+    )
+    variance_amount: Optional[float] = Field(
+        default=None,
+        description="Directional signed variance: source_amount - target_amount",
+    )
+    exposure_amount: Optional[float] = Field(
+        default=None,
+        description="Gross exception exposure: |source_amount - target_amount|",
+    )
+    currency: Optional[str] = Field(default="USD", description="Monetary currency code")
+    severity: Optional[str] = Field(
+        default="medium",
+        description="Discrepancy severity classification: 'high', 'medium', 'low', 'info'",
+    )
+    resolution_status: Optional[str] = Field(
+        default="unresolved", description="Exception resolution workflow status"
+    )
+    resolution_note: Optional[str] = Field(default=None, description="Auditor / reviewer resolution note")
+    resolved_by: Optional[str] = Field(default=None, description="Identifier of user who resolved exception")
+    resolved_at: Optional[datetime] = Field(default=None, description="Timestamp when exception was resolved")
+    cluster_id: Optional[str] = Field(
+        default=None, description="Deterministic exception signature / cluster identifier"
+    )
+    cluster_name: Optional[str] = Field(default=None, description="Human-readable exception cluster name")
+    assigned_to: Optional[str] = Field(default=None, description="Assigned reviewer user ID or email")
+    assigned_at: Optional[datetime] = Field(default=None, description="Timestamp when assigned")
+    side_by_side: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Detailed side-by-side comparison payload (raw vs normalized values)",
+    )
     message: Optional[str] = Field(
         default=None, description="Human-readable outcome or explanation"
     )
@@ -199,6 +249,36 @@ class VerificationSummary(BaseModel):
     needs_review_records: int = Field(
         default=0,
         description="Records requiring human review (fuzzy name variations or candidates)",
+    )
+    fallback_matched_records: int = Field(
+        default=0,
+        description="Batch 4: records matched via a configured fallback key after primary-key matching failed",
+    )
+    attribute_comparisons_completed: int = Field(
+        default=0,
+        description=(
+            "Batch 6: (record, attribute) pairs with at least one actual comparison executed "
+            "(authoritative value vs a carrying source). Denominator: all-present, non-duplicate, "
+            "valid-key records (Batch 8) x configured compare attributes. Unverified pairs excluded."
+        ),
+    )
+    attributes_not_checked: int = Field(
+        default=0,
+        description=(
+            "Batch 6: (record, attribute) pairs where no comparison could be executed "
+            "(owner value blank, or attribute unavailable in every applicable source). "
+            "Batch 8: pairs of invalid-identity-key records are also not checked. "
+            "attribute_comparisons_completed + attributes_not_checked = the full denominator."
+        ),
+    )
+    invalid_key_records: int = Field(
+        default=0,
+        description=(
+            "Batch 8: records whose identity key is missing, blank, or whitespace-only "
+            "(in whole or in part). These records are never identity-matched on the "
+            "invalid key — they surface as needs_review / NULL_KEY outcomes instead of "
+            "successful matches or confirmed duplicates."
+        ),
     )
 
     # Missing metrics
@@ -235,6 +315,37 @@ class VerificationSummary(BaseModel):
     total_discrepancies: int = Field(
         description="Total count of all discrepant records (field mismatches, missing, duplicates)"
     )
+
+    # Financial Materiality & Exposure Metrics (0004_enterprise_governance)
+    gross_exposure: float = Field(
+        default=0.0,
+        description="Absolute monetary sum of all discrepancies and variances",
+    )
+    net_variance: float = Field(
+        default=0.0,
+        description="Signed directional variance: sum(source_amount) - sum(target_amount)",
+    )
+    claimed_amount: float = Field(
+        default=0.0,
+        description="Total monetary value submitted in source records",
+    )
+    verified_amount: float = Field(
+        default=0.0,
+        description="Total monetary value successfully reconciled with zero variance",
+    )
+    outstanding_amount: float = Field(
+        default=0.0,
+        description="Total monetary value currently unreconciled or disputed",
+    )
+    currency: str = Field(
+        default="USD",
+        description="Primary currency code for financial materiality metrics",
+    )
+    exposure_by_currency: Optional[Dict[str, Dict[str, float]]] = Field(
+        default=None,
+        description="Per-currency breakdown of financial materiality metrics",
+    )
+
     status: str = Field(default="completed", description="'completed', 'failed', 'completed_with_warnings'")
 
 
@@ -442,6 +553,17 @@ class VerificationRunResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Maker-Checker Governance & Sign-off Lifecycle
+    sign_off_status: Optional[str] = "DRAFT"
+    sign_off_proposed_by: Optional[uuid.UUID] = None
+    sign_off_proposed_by_name: Optional[str] = None
+    sign_off_proposal_note: Optional[str] = None
+    sign_off_proposed_at: Optional[datetime] = None
+    sign_off_approved_by: Optional[uuid.UUID] = None
+    sign_off_approved_by_name: Optional[str] = None
+    sign_off_decision_note: Optional[str] = None
+    sign_off_decided_at: Optional[datetime] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -480,6 +602,21 @@ class DiscrepancyItemResponse(BaseModel):
     child_records: Optional[List[Dict[str, Any]]] = None
     aggregated_amount: Optional[float] = None
     expected_amount: Optional[float] = None
+    source_amount: Optional[float] = None
+    target_amount: Optional[float] = None
+    variance_amount: Optional[float] = None
+    exposure_amount: Optional[float] = None
+    currency: Optional[str] = "USD"
+    severity: Optional[str] = "medium"
+    resolution_status: Optional[str] = "unresolved"
+    resolution_note: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    cluster_id: Optional[str] = None
+    cluster_name: Optional[str] = None
+    assigned_to: Optional[str] = None
+    assigned_at: Optional[datetime] = None
+    side_by_side: Optional[Dict[str, Any]] = None
     message: Optional[str] = None
     created_at: datetime
 
@@ -493,6 +630,62 @@ class DiscrepancyListResponse(BaseModel):
     items: List[DiscrepancyItemResponse]
     skip: int
     limit: int
+
+
+class FieldComparisonDiff(BaseModel):
+    """Field-level diff between raw source, normalized source, raw target, and normalized target."""
+
+    field_name: str = Field(description="Logical or normalized column name")
+    source_field: Optional[str] = Field(default=None, description="Original source column name")
+    target_field: Optional[str] = Field(default=None, description="Original target column name")
+    raw_source_value: Any = Field(default=None, description="Raw source value before normalization")
+    normalized_source_value: Any = Field(default=None, description="Source value after normalization")
+    raw_target_value: Any = Field(default=None, description="Raw target value before normalization")
+    normalized_target_value: Any = Field(default=None, description="Target value after normalization")
+    is_match: bool = Field(default=True, description="True if values match after normalization")
+    difference_type: Optional[str] = Field(default=None, description="Type of difference")
+    reason_code: Optional[ReasonCode] = Field(default=None, description="Decision reason code")
+    message: Optional[str] = Field(default=None, description="Detailed difference message")
+
+
+class SideBySideInspectionResponse(BaseModel):
+    """Detailed side-by-side inspection payload for an individual record or exception."""
+
+    id: str = Field(description="Record / discrepancy identifier")
+    run_id: Optional[uuid.UUID] = Field(default=None, description="Associated verification run UUID")
+    key_values: Dict[str, Any] = Field(default_factory=dict, description="Reconciliation key values")
+    match_status: MatchStatus
+    discrepancy_category: DiscrepancyCategory
+    reason_code: Optional[ReasonCode] = Field(default=None)
+    confidence_score: Optional[float] = Field(default=None)
+    severity: str = Field(default="medium", description="'high', 'medium', 'low', 'info'")
+
+    # Financial Materiality Metrics
+    source_amount: Optional[float] = Field(default=None, description="Source monetary amount")
+    target_amount: Optional[float] = Field(default=None, description="Target monetary amount")
+    variance_amount: Optional[float] = Field(default=None, description="Signed variance (source - target)")
+    exposure_amount: Optional[float] = Field(default=None, description="Absolute monetary exposure (|source - target|)")
+    currency: Optional[str] = Field(default="USD", description="Currency ISO code")
+
+    # Multi-source Lineage Coordinates
+    source_row_index: Optional[int] = Field(default=None)
+    target_row_index: Optional[int] = Field(default=None)
+    source_row_indices: Optional[Dict[str, Optional[int]]] = Field(default=None)
+    missing_in_sources: Optional[List[str]] = Field(default=None)
+    source_presence: Optional[Dict[str, bool]] = Field(default=None)
+
+    # Records
+    raw_source_record: Optional[Dict[str, Any]] = Field(default=None)
+    normalized_source_record: Optional[Dict[str, Any]] = Field(default=None)
+    raw_target_record: Optional[Dict[str, Any]] = Field(default=None)
+    normalized_target_record: Optional[Dict[str, Any]] = Field(default=None)
+
+    # Field-level Diffs & Rule Diagnostics
+    field_comparisons: List[FieldComparisonDiff] = Field(default_factory=list)
+    failed_rules: List[Dict[str, Any]] = Field(default_factory=list)
+    child_records: Optional[List[Dict[str, Any]]] = Field(default=None)
+    message: Optional[str] = Field(default=None)
+    resolution_status: Optional[str] = Field(default="unresolved")
 
 
 # Re-export multisource schemas

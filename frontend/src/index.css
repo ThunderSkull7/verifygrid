@@ -1,11 +1,11 @@
 /* ==========================================================================
    VerifyGrid — Design System
-   Light / Dark themes + nine selectable accent palettes.
+   Light / Dark themes with a single teal accent.
    All colors are exposed as CSS custom properties (design tokens).
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   1. Design tokens (defaults = light theme, green accent)
+   1. Design tokens (defaults = light theme, teal accent)
    -------------------------------------------------------------------------- */
 :root {
   --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
@@ -81,12 +81,12 @@
   --neutral-text: #516078;
   --neutral-border: rgba(100, 116, 139, 0.26);
 
-  /* Accent palette — default: green (light) */
-  --primary-rgb: 4 120 87;
+  /* Accent palette — teal (light) */
+  --primary-rgb: 15 118 110;
   --primary: rgb(var(--primary-rgb));
-  --primary-hover: #065f46;
+  --primary-hover: #115e59;
   --primary-fg: #ffffff;
-  --primary-text: #047857;
+  --primary-text: #0f766e;
   --primary-soft: rgb(var(--primary-rgb) / 0.1);
   --primary-soft-strong: rgb(var(--primary-rgb) / 0.16);
   --primary-border: rgb(var(--primary-rgb) / 0.32);
@@ -158,6 +158,12 @@
   --neutral-text: #c3cdde;
   --neutral-border: rgba(148, 163, 184, 0.28);
 
+  /* Accent palette — teal (dark) */
+  --primary-rgb: 45 212 191;
+  --primary-hover: #5eead4;
+  --primary-fg: #042f2e;
+  --primary-text: #5eead4;
+
   /* Auth hero panel (dark: deep surface with accent glow) */
   --hero-bg:
     radial-gradient(130% 100% at 100% 0%, rgb(var(--primary-rgb) / 0.3), transparent 62%),
@@ -171,127 +177,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   3. Accent palettes (default = light-theme values)
-   -------------------------------------------------------------------------- */
-[data-accent='green'] {
-  --primary-rgb: 4 120 87;
-  --primary-hover: #065f46;
-  --primary-fg: #ffffff;
-  --primary-text: #047857;
-}
-[data-theme='dark'][data-accent='green'] {
-  --primary-rgb: 16 185 129;
-  --primary-hover: #34d399;
-  --primary-fg: #052e16;
-  --primary-text: #34d399;
-}
-
-[data-accent='blue'] {
-  --primary-rgb: 37 99 235;
-  --primary-hover: #1d4ed8;
-  --primary-fg: #ffffff;
-  --primary-text: #1d4ed8;
-}
-[data-theme='dark'][data-accent='blue'] {
-  --primary-rgb: 59 130 246;
-  --primary-hover: #60a5fa;
-  --primary-fg: #0b1120;
-  --primary-text: #60a5fa;
-}
-
-[data-accent='indigo'] {
-  --primary-rgb: 79 70 229;
-  --primary-hover: #4338ca;
-  --primary-fg: #ffffff;
-  --primary-text: #4338ca;
-}
-[data-theme='dark'][data-accent='indigo'] {
-  --primary-rgb: 129 140 248;
-  --primary-hover: #a5b4fc;
-  --primary-fg: #1e1b4b;
-  --primary-text: #a5b4fc;
-}
-
-[data-accent='purple'] {
-  --primary-rgb: 124 58 237;
-  --primary-hover: #6d28d9;
-  --primary-fg: #ffffff;
-  --primary-text: #6d28d9;
-}
-[data-theme='dark'][data-accent='purple'] {
-  --primary-rgb: 167 139 250;
-  --primary-hover: #c4b5fd;
-  --primary-fg: #2e1065;
-  --primary-text: #c4b5fd;
-}
-
-[data-accent='teal'] {
-  --primary-rgb: 15 118 110;
-  --primary-hover: #115e59;
-  --primary-fg: #ffffff;
-  --primary-text: #0f766e;
-}
-[data-theme='dark'][data-accent='teal'] {
-  --primary-rgb: 45 212 191;
-  --primary-hover: #5eead4;
-  --primary-fg: #042f2e;
-  --primary-text: #5eead4;
-}
-
-[data-accent='cyan'] {
-  --primary-rgb: 14 116 144;
-  --primary-hover: #155e75;
-  --primary-fg: #ffffff;
-  --primary-text: #0e7490;
-}
-[data-theme='dark'][data-accent='cyan'] {
-  --primary-rgb: 34 211 238;
-  --primary-hover: #67e8f9;
-  --primary-fg: #083344;
-  --primary-text: #67e8f9;
-}
-
-[data-accent='orange'] {
-  --primary-rgb: 194 65 12;
-  --primary-hover: #9a3412;
-  --primary-fg: #ffffff;
-  --primary-text: #c2410c;
-}
-[data-theme='dark'][data-accent='orange'] {
-  --primary-rgb: 251 146 60;
-  --primary-hover: #fdba74;
-  --primary-fg: #431407;
-  --primary-text: #fb923c;
-}
-
-[data-accent='rose'] {
-  --primary-rgb: 190 18 60;
-  --primary-hover: #9f1239;
-  --primary-fg: #ffffff;
-  --primary-text: #be123c;
-}
-[data-theme='dark'][data-accent='rose'] {
-  --primary-rgb: 251 113 133;
-  --primary-hover: #fda4af;
-  --primary-fg: #4c0519;
-  --primary-text: #fb7185;
-}
-
-[data-accent='neutral'] {
-  --primary-rgb: 51 65 85;
-  --primary-hover: #1e293b;
-  --primary-fg: #ffffff;
-  --primary-text: #334155;
-}
-[data-theme='dark'][data-accent='neutral'] {
-  --primary-rgb: 148 163 184;
-  --primary-hover: #cbd5e1;
-  --primary-fg: #0f172a;
-  --primary-text: #cbd5e1;
-}
-
-/* --------------------------------------------------------------------------
-   4. Base / reset
+   3. Base / reset
    -------------------------------------------------------------------------- */
 * {
   box-sizing: border-box;
@@ -383,7 +269,7 @@ code,
 }
 
 /* --------------------------------------------------------------------------
-   5. App shell
+   4. App shell
    -------------------------------------------------------------------------- */
 .app-container {
   display: flex;
@@ -762,7 +648,7 @@ code,
 }
 
 /* --------------------------------------------------------------------------
-   6. Cards, metrics
+   5. Cards, metrics
    -------------------------------------------------------------------------- */
 .card {
   background-color: var(--bg-card);
@@ -876,7 +762,7 @@ code,
 }
 
 /* --------------------------------------------------------------------------
-   7. Buttons
+   6. Buttons
    -------------------------------------------------------------------------- */
 .btn {
   display: inline-flex;
@@ -1017,7 +903,7 @@ code,
 }
 
 /* --------------------------------------------------------------------------
-   8. Badges, alerts, chips
+   7. Badges, alerts, chips
    -------------------------------------------------------------------------- */
 .badge {
   display: inline-flex;
@@ -1198,7 +1084,7 @@ button.chip.selected {
 }
 
 /* --------------------------------------------------------------------------
-   9. Forms
+   8. Forms
    -------------------------------------------------------------------------- */
 .form-group {
   margin-bottom: 16px;
@@ -1375,7 +1261,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   10. Tables
+   9. Tables
    -------------------------------------------------------------------------- */
 .table-container {
   width: 100%;
@@ -1497,7 +1383,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   11. Empty states, loading
+   10. Empty states, loading
    -------------------------------------------------------------------------- */
 .empty-state {
   text-align: center;
@@ -1585,7 +1471,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   12. Projects
+   11. Projects
    -------------------------------------------------------------------------- */
 .project-grid {
   display: grid;
@@ -1688,7 +1574,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   13. Modal
+   12. Modal
    -------------------------------------------------------------------------- */
 .modal-backdrop {
   position: fixed;
@@ -1754,7 +1640,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   14. Appearance control
+   13. Appearance control
    -------------------------------------------------------------------------- */
 .appearance-wrap {
   position: relative;
@@ -1840,7 +1726,7 @@ input[type='checkbox']:not(.switch input) {
 
 .segmented {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 4px;
   background-color: var(--bg-subtle);
   border: 1px solid var(--border-subtle);
@@ -1872,31 +1758,6 @@ input[type='checkbox']:not(.switch input) {
   box-shadow: var(--shadow-sm);
 }
 
-.accent-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 9px;
-}
-
-.accent-swatch {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-full);
-  background: var(--swatch);
-  position: relative;
-  border: none;
-  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
-  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.12);
-}
-
-.accent-swatch:hover {
-  transform: scale(1.12);
-}
-
-.accent-swatch.selected {
-  box-shadow: 0 0 0 2px var(--bg-card), 0 0 0 4px var(--swatch);
-}
-
 .appearance-current-note {
   margin-top: 14px;
   padding-top: 12px;
@@ -1909,7 +1770,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   15. Dropzone & uploads
+   14. Dropzone & uploads
    -------------------------------------------------------------------------- */
 .dropzone {
   border: 1.5px dashed var(--border-strong);
@@ -2096,7 +1957,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   16. Config / results helpers
+   15. Config / results helpers
    -------------------------------------------------------------------------- */
 .config-grid {
   display: grid;
@@ -2159,7 +2020,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   17. Auth
+   16. Auth
    -------------------------------------------------------------------------- */
 .auth-wrapper {
   min-height: 100vh;
@@ -2359,7 +2220,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   18. Global loading splash
+   17. Global loading splash
    -------------------------------------------------------------------------- */
 .boot-splash {
   min-height: 100vh;
@@ -2375,7 +2236,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   19. Utilities
+   18. Utilities
    -------------------------------------------------------------------------- */
 .row {
   display: flex;
@@ -2440,7 +2301,7 @@ input[type='checkbox']:not(.switch input) {
 }
 
 /* --------------------------------------------------------------------------
-   20. Responsive
+   19. Responsive
    -------------------------------------------------------------------------- */
 @media (max-width: 1024px) {
   .sidebar {
