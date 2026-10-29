@@ -1,7 +1,9 @@
+"""API router for the append-only cryptographic audit trail."""
+
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
@@ -9,14 +11,8 @@ from app.api.deps import get_current_user, verify_project_access
 from app.db.session import get_db
 from app.models.project import Project
 from app.models.user import User
-from app.schemas.audit import (
-    AuditTrailResponse,
-    AuditVerificationResponse,
-)
-from app.services.audit_service import (
-    get_audit_trail,
-    verify_audit_chain,
-)
+from app.schemas.audit import AuditTrailResponse, AuditVerificationResponse
+from app.services.audit_service import get_audit_trail, verify_audit_chain
 
 router = APIRouter(tags=["audit"])
 
@@ -37,13 +33,14 @@ def get_run_audit_trail_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AuditTrailResponse:
-    """Retrieve audit events."""
+    """Retrieve audit events for an authorized project run."""
     return get_audit_trail(
         db=db,
         project_id=project_id,
         run_id=run_id,
         skip=skip,
         limit=limit,
+        current_user=current_user,
     )
 
 
@@ -61,9 +58,10 @@ def verify_run_audit_chain_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AuditVerificationResponse:
-    """Verify cryptographic audit chain."""
+    """Verify cryptographic audit chain for an authorized project run."""
     return verify_audit_chain(
         db=db,
         project_id=project_id,
         run_id=run_id,
+        current_user=current_user,
     )

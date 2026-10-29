@@ -1,9 +1,12 @@
+"""Pydantic schemas for the append-only audit trail."""
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -22,6 +25,7 @@ class AuditEventType(str, Enum):
 
 class AuditEventResponse(BaseModel):
     """Single immutable audit event with hash-chain linkage."""
+
     id: uuid.UUID
     event_id: str
     sequence_number: int
@@ -42,6 +46,7 @@ class AuditEventResponse(BaseModel):
 
 class AuditTrailResponse(BaseModel):
     """Paginated list of cryptographic audit events for a verification run."""
+
     total: int
     items: List[AuditEventResponse]
     is_chain_valid: bool = True
@@ -51,6 +56,7 @@ class AuditTrailResponse(BaseModel):
 
 class AuditVerificationBrokenLink(BaseModel):
     """Diagnostic details for a broken or tampered audit event link."""
+
     sequence_number: int
     event_id: str
     reason: str
@@ -60,6 +66,7 @@ class AuditVerificationBrokenLink(BaseModel):
 
 class AuditVerificationResponse(BaseModel):
     """Cryptographic chain verification outcome."""
+
     status: str = Field(description="VALID or TAMPERED")
     is_valid: bool
     total_events: int

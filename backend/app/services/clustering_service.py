@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.models.user import User
 from app.models.verification_run import VerificationDiscrepancy, VerificationRun
 from app.schemas.result import DiscrepancyItemResponse
 from app.schemas.review import (
@@ -19,6 +20,13 @@ from app.schemas.review import (
     ClusterRecordsResponse,
     ExceptionCluster,
 )
+from app.services.project_service import get_project_by_id
+
+
+def _authorize_project(db: Session, project_id: uuid.UUID, current_user: Optional[User]) -> None:
+    """Fail closed when a caller supplies a principal without project ownership."""
+    if current_user is not None and get_project_by_id(db, project_id, current_user=current_user) is None:
+        raise ValueError(f"Project {project_id} not found")
 
 
 def _normalize_token(val: Any) -> str:
@@ -295,7 +303,8 @@ def cluster_discrepancies_in_memory(
             severity = getattr(rec, "severity", "medium") or "medium"
 
         if cid not in clusters_map:
-            cname = generate_cluster_name(sig, rec)
+            # cluster_name is varchar(255) in the canonical schema.
+            cname = generate_cluster_name(sig, rec)[:255]
             clusters_map[cid] = {
                 "signature": sig,
                 "cluster_id": cid,
@@ -373,12 +382,15 @@ def get_run_clusters(
     db: Session,
     project_id: uuid.UUID,
     run_id: uuid.UUID,
+    current_user: Optional[User] = None,
 ) -> ClusterListResponse:
     """
     Fetches and returns all exception clusters for a persistent verification run.
     Also syncs cluster_id and cluster_name back to VerificationDiscrepancy rows
     for optimized index lookups.
     """
+    _authorize_project(db, project_id, current_user)
+
     # Verify run exists and belongs to project
     run = (
         db.query(VerificationRun)
@@ -442,10 +454,13 @@ def get_cluster_records(
     limit: int = 50,
     resolution_status: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    current_user: Optional[User] = None,
 ) -> ClusterRecordsResponse:
     """
     Returns paginated discrepancy items belonging to a specific cluster.
     """
+    _authorize_project(db, project_id, current_user)
+
     # Ensure run belongs to project
     run = (
         db.query(VerificationRun)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from fastapi import APIRouter, Depends, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -42,6 +44,7 @@ router = APIRouter()
 def get_file_profile_endpoint(
     project_id: uuid.UUID,
     file_id: uuid.UUID,
+    worksheet: Optional[str] = Query(None, description="XLSX worksheet name (exact); defaults to the workbook's active sheet."),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> FileProfileSummary:
@@ -50,6 +53,7 @@ def get_file_profile_endpoint(
         db=db,
         project_id=project_id,
         file_id=file_id,
+        worksheet=worksheet,
         current_user=current_user,
     )
 
@@ -70,6 +74,7 @@ def get_file_profile_endpoint(
 def get_file_quarantine_endpoint(
     project_id: uuid.UUID,
     file_id: uuid.UUID,
+    worksheet: Optional[str] = Query(None, description="XLSX worksheet name (exact); defaults to the workbook's active sheet."),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> QuarantineListResponse:
@@ -78,6 +83,7 @@ def get_file_quarantine_endpoint(
         db=db,
         project_id=project_id,
         file_id=file_id,
+        worksheet=worksheet,
         current_user=current_user,
     )
 
@@ -99,6 +105,7 @@ def resolve_quarantine_endpoint(
     project_id: uuid.UUID,
     file_id: uuid.UUID,
     request: QuarantineResolutionRequest,
+    worksheet: Optional[str] = Query(None, description="XLSX worksheet name (exact); defaults to the workbook's active sheet."),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> QuarantineResolutionResponse:
@@ -108,6 +115,7 @@ def resolve_quarantine_endpoint(
         project_id=project_id,
         file_id=file_id,
         request=request,
+        worksheet=worksheet,
         current_user=current_user,
     )
 

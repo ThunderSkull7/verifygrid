@@ -1,9 +1,10 @@
-"""API router for exception clustering, bulk human reviews, and reviewer assignments."""
+"""API router for exception clustering, bulk human reviews, and assignments."""
 
 from __future__ import annotations
 
-from typing import Optional
 import uuid
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
@@ -21,10 +22,7 @@ from app.schemas.review import (
     ReviewDecisionItem,
     ReviewDecisionRequest,
 )
-from app.services.clustering_service import (
-    get_cluster_records,
-    get_run_clusters,
-)
+from app.services.clustering_service import get_cluster_records, get_run_clusters
 from app.services.review_service import (
     apply_bulk_review,
     apply_single_review,
@@ -48,11 +46,16 @@ def get_run_clusters_endpoint(
     db: Session = Depends(get_db),
 ) -> ClusterListResponse:
     """
-    Returns deterministic root-cause exception clusters with aggregated financial exposure,
-    record counts, root-cause explanations, and representative sample records.
+    Returns deterministic root-cause exception clusters with aggregated financial
+    exposure, record counts, root-cause explanations, and representative samples.
     """
     try:
-        return get_run_clusters(db, project_id=project_id, run_id=run_id)
+        return get_run_clusters(
+            db,
+            project_id=project_id,
+            run_id=run_id,
+            current_user=current_user,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -92,6 +95,7 @@ def get_cluster_records_endpoint(
             limit=limit,
             resolution_status=resolution_status,
             assigned_to=assigned_to,
+            current_user=current_user,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -115,9 +119,9 @@ def apply_bulk_review_endpoint(
     db: Session = Depends(get_db),
 ) -> BulkReviewResponse:
     """
-    Applies review decision (APPROVE, REJECT, FORCE_MATCH, ESCALATE, REOPEN) in bulk.
-    Enforces mandatory justification, applies financial exposure barriers and blocking checks,
-    and creates individual audit records for every affected row.
+    Applies a review decision (APPROVE, REJECT, FORCE_MATCH, ESCALATE, REOPEN)
+    in bulk. Enforces mandatory justification, financial exposure barriers, and
+    blocking checks, and records an individual decision for every affected row.
     """
     try:
         return apply_bulk_review(
@@ -150,7 +154,8 @@ def apply_single_review_endpoint(
     db: Session = Depends(get_db),
 ) -> ReviewDecisionItem:
     """
-    Resolves an individual exception record with a mandatory justification note and audit trail entry.
+    Resolves an individual exception with a mandatory justification note and an
+    immutable decision record. Reviewer identity comes from the bearer token.
     """
     try:
         return apply_single_review(
@@ -182,9 +187,7 @@ def assign_discrepancies_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AssignmentResponse:
-    """
-    Assigns designated records or a full cluster to a designated reviewer.
-    """
+    """Assign designated records or a full cluster to a designated reviewer."""
     try:
         return assign_discrepancies(
             db=db,

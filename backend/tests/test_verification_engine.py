@@ -696,8 +696,15 @@ def test_verify_composite_keys_with_partial_null():
 
     assert summary.matched_records == 1
     assert summary.identical_matches == 1  # (T1, U100)
-    assert summary.unmatched_source_records == 1  # (T1, None)
-    assert summary.unmatched_target_records == 1  # (T1, U200)
+    # Batch 8: the (T1, None) record has an invalid composite key (null component)
+    # and is reported as an explicit invalid-key record (needs_review), NOT as a
+    # missing-source record and NOT as a match.
+    assert summary.invalid_key_records == 1
+    assert summary.unmatched_source_records == 0
+    assert summary.unmatched_target_records == 1  # (T1, U200) genuinely unmatched
     assert any(w.issue_type == "null_key" for w in warnings)
+    invalid_items = [r for r in results if r.match_status.value == "needs_review"]
+    assert len(invalid_items) == 1
+    assert invalid_items[0].reason_code.value == "NULL_KEY"
 
 

@@ -52,6 +52,14 @@ class PreprocessingConfig(BaseModel):
         le=500000,
         description="Safety row count limit for in-memory preprocessing.",
     )
+    selected_worksheet: Optional[str] = Field(
+        default=None,
+        description=(
+            "Batch 7: exact worksheet name to parse for XLSX workbooks. When omitted, "
+            "legacy behavior applies (the workbook's active sheet is used). Never "
+            "silently substituted: an unknown name fails with an actionable error."
+        ),
+    )
 
     model_config = ConfigDict(extra="ignore")
 
@@ -103,6 +111,17 @@ class PreprocessingResultResponse(BaseModel):
     preview_rows: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="Sample normalized data records (first 10 rows) with source_row_number included",
+    )
+    sheet_names: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Batch 7: for XLSX workbooks only — available worksheet names in workbook "
+            "order, for explicit worksheet selection. None for CSV files."
+        ),
+    )
+    selected_worksheet: Optional[str] = Field(
+        default=None,
+        description="Batch 7: the worksheet this preprocessing run parsed (XLSX only; None = active sheet).",
     )
 
     model_config = ConfigDict(from_attributes=True)

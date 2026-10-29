@@ -11,37 +11,22 @@
     <meta name="theme-color" content="#f6f8fb" />
     <title>VerifyGrid — Data Reconciliation</title>
     <script>
-      // Apply the persisted theme/accent before first paint to avoid a flash of the wrong theme.
+      // Apply the persisted Light/Dark theme before first paint to avoid a flash of the wrong theme.
       (function () {
         try {
-          var theme = localStorage.getItem('verifygrid_theme') || 'system';
-          var accent = localStorage.getItem('verifygrid_accent') || 'green';
-          var validThemes = ['light', 'dark', 'system'];
-          var validAccents = [
-            'green',
-            'blue',
-            'indigo',
-            'purple',
-            'teal',
-            'cyan',
-            'orange',
-            'rose',
-            'neutral',
-          ];
-          if (validThemes.indexOf(theme) === -1) theme = 'system';
-          if (validAccents.indexOf(accent) === -1) accent = 'green';
-          var resolved =
-            theme === 'system'
-              ? window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+          var theme = localStorage.getItem('verifygrid_theme');
+          if (theme !== 'light' && theme !== 'dark') {
+            // Missing, retired "system", or invalid value: resolve once from the OS preference.
+            theme =
+              window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
                 ? 'dark'
-                : 'light'
-              : theme;
+                : 'light';
+          }
           var root = document.documentElement;
-          root.setAttribute('data-theme', resolved);
-          root.setAttribute('data-accent', accent);
-          root.style.colorScheme = resolved;
+          root.setAttribute('data-theme', theme);
+          root.style.colorScheme = theme;
           var meta = document.querySelector('meta[name="theme-color"]');
-          if (meta) meta.setAttribute('content', resolved === 'dark' ? '#0b1120' : '#f6f8fb');
+          if (meta) meta.setAttribute('content', theme === 'dark' ? '#0b1120' : '#f6f8fb');
         } catch (e) {
           /* localStorage unavailable — the app will apply defaults after mount. */
         }

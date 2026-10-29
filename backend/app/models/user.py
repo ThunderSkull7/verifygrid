@@ -15,7 +15,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
+        Uuid(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4,
     )
@@ -36,6 +36,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(
         String(50),
         default="MAKER",
+        server_default="MAKER",
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -50,7 +51,6 @@ class User(Base):
         nullable=False,
     )
 
-    # Relationships
     projects: Mapped[List["Project"]] = relationship(
         "Project",
         back_populates="owner",

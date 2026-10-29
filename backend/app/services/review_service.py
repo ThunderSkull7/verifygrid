@@ -1,15 +1,22 @@
-"""Bulk Human Review, Decision Persistence, Safeguards & Assignment Service.
+"""Bulk human review, decision persistence, safeguards, and assignment.
 
-Handles granular and cluster-level review decisions (APPROVE, REJECT, FORCE_MATCH, ESCALATE, REOPEN),
-enforces justification notes, financial exposure barriers, individual audit trail entries,
-and reviewer assignments.
+Security boundary: reviewer identity is derived from the authenticated
+principal. Client-supplied ``reviewer_id`` / ``reviewer_email`` fields on review
+decisions are accepted only for wire compatibility and are ignored.
+
+Schema boundary: ``discrepancy_review_decisions`` is created by the pending
+``0006_discrepancy_review_decisions`` migration. Until it exists, review writes
+return an explicit 503 instead of leaking a database error.
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-import uuid
+
+from fastapi import HTTPException, status
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
 from app.models.verification_run import (
@@ -17,6 +24,7 @@ from app.models.verification_run import (
     VerificationDiscrepancy,
     VerificationRun,
 )
+from app.schemas.audit import AuditEventType
 from app.schemas.review import (
     AssignmentRequest,
     AssignmentResponse,
@@ -25,10 +33,9 @@ from app.schemas.review import (
     ReviewDecisionItem,
     ReviewDecisionRequest,
 )
-from app.schemas.audit import AuditEventType
 from app.services.audit_service import log_audit_event
 
-# Standard decision status transitions
+# Standard decision status transitions.
 DECISION_TO_STATUS = {
     "APPROVE": "APPROVED",
     "REJECT": "REJECTED",
@@ -37,35 +44,58 @@ DECISION_TO_STATUS = {
     "REOPEN": "PENDING_REVIEW",
 }
 
+_REVIEW_TABLE = "discrepancy_review_decisions"
 
-def _validate_decision_and_justification(decision: str, justification: Optional[str]) -> str:
-    """Validate decision keyword and ensure non-empty justification."""
+
+def ensure_review_schema(db: Session) -> None:
+    """Fail explicitly when the pending 0006 review table is unavailable."""
+    bind = db.get_bind()
+    if bind is not None and not inspect(bind).has_table(_REVIEW_TABLE):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Review decisions require the discrepancy_review_decisions "
+                "table, which is deferred to the Batch 26C migration."
+            ),
+        )
+
+
+def _review_identity(current_user: Any) -> tuple[str, Optional[str], str]:
+    """Return (reviewer_id, reviewer_email, authoritative_role) from the principal."""
+    if current_user is None:
+        raise ValueError("An authenticated reviewer is required.")
+    reviewer_id = str(getattr(current_user, "id", "") or "").strip()
+    if not reviewer_id:
+        raise ValueError("An authenticated reviewer is required.")
+    reviewer_email = getattr(current_user, "email", None)
+    raw_role = getattr(current_user, "role", None)
+    role = str(raw_role).strip().upper() if raw_role is not None else "UNKNOWN"
+    if role not in {"MAKER", "CHECKER", "ADMIN", "VIEWER"}:
+        role = "UNKNOWN"
+    return reviewer_id, reviewer_email, role
+
+
+def _validate_decision_and_justification(
+    decision: str,
+    justification: Optional[str],
+) -> str:
+    """Validate the decision keyword and mandatory bounded justification."""
     dec_upper = str(decision).strip().upper()
     if dec_upper not in DECISION_TO_STATUS:
         valid_opts = ", ".join(DECISION_TO_STATUS.keys())
         raise ValueError(f"Invalid decision '{decision}'. Must be one of: {valid_opts}")
 
     if not justification or not justification.strip():
-        raise ValueError("A justification note is required for manual overrides and review decisions.")
+        raise ValueError(
+            "A justification note is required for manual overrides and review decisions."
+        )
+    if len(justification.strip()) > 10000:
+        raise ValueError("Justification must not exceed 10000 characters.")
 
     return dec_upper
 
 
-def apply_single_review(
-    db: Session,
-    project_id: uuid.UUID,
-    run_id: uuid.UUID,
-    discrepancy_id: uuid.UUID,
-    request: ReviewDecisionRequest,
-    current_user: Optional[Any] = None,
-) -> ReviewDecisionItem:
-    """
-    Applies a review decision to an individual discrepancy and logs an audit decision.
-    """
-    decision = _validate_decision_and_justification(request.decision, request.justification)
-    new_status = DECISION_TO_STATUS[decision]
-
-    # Verify run and discrepancy exist within project
+def _get_run(db: Session, project_id: uuid.UUID, run_id: uuid.UUID) -> VerificationRun:
     run = (
         db.query(VerificationRun)
         .filter(
@@ -76,7 +106,26 @@ def apply_single_review(
     )
     if not run:
         raise ValueError(f"Verification run {run_id} not found in project {project_id}")
+    return run
 
+
+def apply_single_review(
+    db: Session,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    discrepancy_id: uuid.UUID,
+    request: ReviewDecisionRequest,
+    current_user: Optional[Any] = None,
+) -> ReviewDecisionItem:
+    """Apply one review decision and record an immutable audit trail entry."""
+    ensure_review_schema(db)
+    decision = _validate_decision_and_justification(
+        request.decision, request.justification
+    )
+    new_status = DECISION_TO_STATUS[decision]
+    reviewer_id, reviewer_email, user_role = _review_identity(current_user)
+
+    _get_run(db, project_id, run_id)
     disc: Optional[VerificationDiscrepancy] = (
         db.query(VerificationDiscrepancy)
         .filter(
@@ -88,24 +137,15 @@ def apply_single_review(
     if not disc:
         raise ValueError(f"Discrepancy {discrepancy_id} not found in run {run_id}")
 
-    reviewer_id = (
-        request.reviewer_id
-        or (str(current_user.id) if current_user and hasattr(current_user, "id") else "system")
-    )
-    reviewer_email = (
-        request.reviewer_email
-        or (current_user.email if current_user and hasattr(current_user, "email") else None)
-    )
-
     prev_status = disc.resolution_status or "unresolved"
     now_utc = datetime.now(timezone.utc)
+    justification = request.justification.strip()
 
-    # 1. Create individual audit decision entry
     audit_entry = DiscrepancyReviewDecision(
         discrepancy_id=disc.id,
         run_id=run_id,
         decision=decision,
-        justification=request.justification.strip(),
+        justification=justification,
         reviewer_id=reviewer_id,
         reviewer_email=reviewer_email,
         previous_status=prev_status,
@@ -116,9 +156,8 @@ def apply_single_review(
     )
     db.add(audit_entry)
 
-    # 2. Update discrepancy resolution state
     disc.resolution_status = new_status
-    disc.resolution_note = request.justification.strip()
+    disc.resolution_note = justification
     disc.resolved_by = reviewer_email or reviewer_id
     disc.resolved_at = now_utc
 
@@ -131,14 +170,14 @@ def apply_single_review(
             "action": "SINGLE_REVIEW",
             "discrepancy_id": str(disc.id),
             "decision": decision,
-            "justification": request.justification.strip(),
+            "justification": justification,
             "previous_status": prev_status,
             "new_status": new_status,
             "cluster_id": disc.cluster_id,
         },
         user_id=getattr(current_user, "id", None),
         user_email=reviewer_email,
-        user_role=getattr(current_user, "role", "MAKER") if current_user else "MAKER",
+        user_role=user_role,
         timestamp_utc=now_utc,
     )
 
@@ -168,27 +207,19 @@ def apply_bulk_review(
     request: BulkReviewRequest,
     current_user: Optional[Any] = None,
 ) -> BulkReviewResponse:
-    """
-    Executes a bulk review decision across records in a cluster or an explicit list of IDs.
-    Enforces justification, checks financial exposure barriers, prevents silent approval
-    of blocking records, and records an individual audit decision entry for every affected record.
-    """
-    decision = _validate_decision_and_justification(request.decision, request.justification)
-    new_status = DECISION_TO_STATUS[decision]
+    """Apply a decision to a cluster or explicit list of discrepancies.
 
-    # Verify run exists and belongs to project
-    run = (
-        db.query(VerificationRun)
-        .filter(
-            VerificationRun.id == run_id,
-            VerificationRun.project_id == project_id,
-        )
-        .first()
+    Financial-exposure and BLOCKING-rule safeguards are retained from the
+    deployed implementation.
+    """
+    ensure_review_schema(db)
+    decision = _validate_decision_and_justification(
+        request.decision, request.justification
     )
-    if not run:
-        raise ValueError(f"Verification run {run_id} not found in project {project_id}")
+    new_status = DECISION_TO_STATUS[decision]
+    reviewer_id, reviewer_email, user_role = _review_identity(current_user)
 
-    # Build query for target discrepancies
+    _get_run(db, project_id, run_id)
     query = db.query(VerificationDiscrepancy).filter(
         VerificationDiscrepancy.run_id == run_id
     )
@@ -202,23 +233,17 @@ def apply_bulk_review(
         except (ValueError, AttributeError) as exc:
             raise ValueError(f"Invalid discrepancy UUID list: {exc}")
     else:
-        raise ValueError("Either cluster_id or discrepancy_ids must be specified for bulk review.")
+        raise ValueError(
+            "Either cluster_id or discrepancy_ids must be specified for bulk review."
+        )
 
     records: List[VerificationDiscrepancy] = query.all()
     total_requested = len(records)
 
-    reviewer_id = (
-        str(current_user.id) if current_user and hasattr(current_user, "id") else "reviewer"
-    )
-    reviewer_email = (
-        current_user.email if current_user and hasattr(current_user, "email") else None
-    )
-
     succeeded_ids: List[str] = []
     failed_records: List[Dict[str, Any]] = []
     now_utc = datetime.now(timezone.utc)
-
-    # Financial Exposure Safeguard: default to provided threshold or None
+    justification = request.justification.strip()
     max_thresh = request.max_exposure_threshold
 
     for disc in records:
@@ -226,38 +251,38 @@ def apply_bulk_review(
         exposure = disc.exposure_amount or 0.0
         severity = (disc.severity or "medium").upper()
 
-        # Check Eligibility Barriers for APPROVE and FORCE_MATCH
         if decision in ("APPROVE", "FORCE_MATCH"):
-            # Barrier 1: Exposure Threshold
             if max_thresh is not None and exposure > max_thresh:
                 failed_records.append(
                     {
                         "id": disc_id_str,
                         "reason": (
-                            f"Exposure of {disc.currency or 'USD'} {exposure:,.2f} exceeds "
-                            f"bulk approval threshold limit of {max_thresh:,.2f}."
+                            f"Exposure of {disc.currency or 'USD'} {exposure:,.2f} "
+                            f"exceeds bulk approval threshold limit of "
+                            f"{max_thresh:,.2f}."
                         ),
                     }
                 )
                 continue
 
-            # Barrier 2: Hard BLOCKING Rule Failure
             if severity == "BLOCKING" and not request.allow_blocking_override:
                 failed_records.append(
                     {
                         "id": disc_id_str,
-                        "reason": "Hard BLOCKING rule failure cannot be bulk approved without explicit override.",
+                        "reason": (
+                            "Hard BLOCKING rule failure cannot be bulk approved "
+                            "without explicit override."
+                        ),
                     }
                 )
                 continue
 
-        # If eligible, persist individual review decision entry
         prev_status = disc.resolution_status or "unresolved"
         audit_entry = DiscrepancyReviewDecision(
             discrepancy_id=disc.id,
             run_id=run_id,
             decision=decision,
-            justification=request.justification.strip(),
+            justification=justification,
             reviewer_id=reviewer_id,
             reviewer_email=reviewer_email,
             previous_status=prev_status,
@@ -268,9 +293,8 @@ def apply_bulk_review(
         )
         db.add(audit_entry)
 
-        # Update record state
         disc.resolution_status = new_status
-        disc.resolution_note = request.justification.strip()
+        disc.resolution_note = justification
         disc.resolved_by = reviewer_email or reviewer_id
         disc.resolved_at = now_utc
         succeeded_ids.append(disc_id_str)
@@ -284,14 +308,14 @@ def apply_bulk_review(
             event_payload={
                 "action": "BULK_REVIEW",
                 "decision": decision,
-                "justification": request.justification.strip(),
+                "justification": justification,
                 "succeeded_count": len(succeeded_ids),
                 "ineligible_count": len(failed_records),
                 "cluster_id": request.cluster_id,
             },
             user_id=getattr(current_user, "id", None),
             user_email=reviewer_email,
-            user_role=getattr(current_user, "role", "MAKER") if current_user else "MAKER",
+            user_role=user_role,
             timestamp_utc=now_utc,
         )
 
@@ -299,7 +323,6 @@ def apply_bulk_review(
 
     succeeded_count = len(succeeded_ids)
     ineligible_count = len(failed_records)
-    failed_count = ineligible_count
 
     if ineligible_count > 0:
         msg = (
@@ -312,7 +335,7 @@ def apply_bulk_review(
     return BulkReviewResponse(
         total_requested=total_requested,
         succeeded_count=succeeded_count,
-        failed_count=failed_count,
+        failed_count=ineligible_count,
         ineligible_count=ineligible_count,
         succeeded_ids=succeeded_ids,
         failed_records=failed_records,
@@ -327,23 +350,20 @@ def assign_discrepancies(
     request: AssignmentRequest,
     current_user: Optional[Any] = None,
 ) -> AssignmentResponse:
-    """
-    Assigns designated records or an entire cluster to a specific reviewer.
-    """
+    """Assign designated records or an entire cluster to a reviewer."""
+    if current_user is None:
+        raise ValueError("An authenticated user is required to assign records.")
+
     if not request.reviewer_id or not request.reviewer_id.strip():
         raise ValueError("Reviewer ID or email is required for assignment.")
 
-    run = (
-        db.query(VerificationRun)
-        .filter(
-            VerificationRun.id == run_id,
-            VerificationRun.project_id == project_id,
+    target_assignee = (request.reviewer_email or request.reviewer_id).strip()
+    if len(target_assignee) > 100:
+        raise ValueError(
+            "Assignee must not exceed 100 characters (assigned_to column limit)."
         )
-        .first()
-    )
-    if not run:
-        raise ValueError(f"Verification run {run_id} not found in project {project_id}")
 
+    _get_run(db, project_id, run_id)
     query = db.query(VerificationDiscrepancy).filter(
         VerificationDiscrepancy.run_id == run_id
     )
@@ -357,17 +377,18 @@ def assign_discrepancies(
         except (ValueError, AttributeError) as exc:
             raise ValueError(f"Invalid discrepancy UUID list: {exc}")
     else:
-        raise ValueError("Either cluster_id or discrepancy_ids must be specified for assignment.")
+        raise ValueError(
+            "Either cluster_id or discrepancy_ids must be specified for assignment."
+        )
 
     records = query.all()
-    target_assignee = request.reviewer_email or request.reviewer_id.strip()
     now_utc = datetime.now(timezone.utc)
     assigned_ids: List[str] = []
 
-    for r in records:
-        r.assigned_to = target_assignee
-        r.assigned_at = now_utc
-        assigned_ids.append(str(r.id))
+    for record in records:
+        record.assigned_to = target_assignee
+        record.assigned_at = now_utc
+        assigned_ids.append(str(record.id))
 
     db.commit()
 

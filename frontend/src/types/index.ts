@@ -49,6 +49,7 @@ export interface PreprocessingConfig {
   normalize_numbers?: boolean;
   identifier_columns?: string[];
   max_rows?: number;
+  selected_worksheet?: string | null;
 }
 
 export interface ValidationIssue {
@@ -82,6 +83,8 @@ export interface PreprocessingResult {
   duplicate_record_row_numbers: number[][];
   issues: ValidationIssue[];
   preview_rows: Record<string, any>[];
+  sheet_names?: string[] | null;
+  selected_worksheet?: string | null;
 }
 
 export type MatchStatus =
@@ -140,6 +143,7 @@ export interface VerificationResultItem {
   source_file_id?: string | null;
   target_file_id?: string | null;
   lineage?: Record<string, any> | null;
+  unverified_fields?: string[] | null;
   source_row_indices?: Record<string, number | null> | null;
   source_records?: Record<string, Record<string, any> | null> | null;
   missing_in_sources?: string[] | null;
@@ -194,6 +198,11 @@ export interface VerificationSummary {
   outstanding_amount?: number;
   currency?: string;
   exposure_by_currency?: Record<string, Record<string, number>> | null;
+  overall_materiality_ratio?: number;
+  fallback_matched_records?: number;
+  attribute_comparisons_completed?: number;
+  attributes_not_checked?: number;
+  invalid_key_records?: number;
 }
 
 export interface VerificationRequest {
@@ -484,6 +493,9 @@ export interface MultiSourceVerificationRequest {
   sources: SourceDefinition[];
   unified_keys: string[];
   compare_attributes?: string[] | null;
+  fallback_keys?: string[][] | null;
+  multi_primary?: boolean;
+  field_ownership?: Record<string, string> | null;
   ignore_attributes?: string[];
   numeric_tolerance?: number;
   ignore_whitespace?: boolean;
@@ -927,3 +939,103 @@ export interface RecipeApplyValidationResult {
 
 
 
+
+
+// --- Organization Mode Column Mapping Types ---
+export type MappingState = 'suggested' | 'confirmed' | 'needs_confirmation' | 'unmapped';
+
+export interface ColumnMappingEntry {
+  column: string | null;
+  state: MappingState;
+  sampleValue?: any;
+}
+
+export type FileColumnMappings = Record<string, ColumnMappingEntry>;
+
+export interface UploadedDataset {
+  id: string;
+  name: string;
+  label?: string;
+  isPrimary?: boolean;
+  selectedSheet?: string | null;
+  profile?: PreprocessingResult;
+}
+
+// ===================== Batch 11: Verification Templates =====================
+
+/** Reusable per-source slot of a template. Deliberately has no file binding,
+ *  no row indices, and no quarantine state — templates store configuration only. */
+export interface TemplateSourceSlot {
+  alias: string;
+  label?: string | null;
+  is_primary: boolean;
+  key_columns: string[];
+  field_mapping: Record<string, string>;
+  /** Batch 7 worksheet selection; revalidated against every new XLSX upload. */
+  sheet_name?: string | null;
+}
+
+/** Versioned template configuration snapshot (organization mode, schema v1). */
+export interface TemplateConfigurationV1 {
+  version: 1;
+  sources: TemplateSourceSlot[];
+  unified_keys: string[];
+  compare_attributes?: string[] | null;
+  ignore_attributes?: string[];
+  numeric_tolerance?: number;
+  ignore_whitespace?: boolean;
+  ignore_case?: boolean;
+  include_identical?: boolean;
+  fallback_keys?: string[][] | null;
+  multi_primary?: boolean;
+  field_ownership?: Record<string, string> | null;
+}
+
+export type TemplateMode = 'organization';
+export type TemplateVisibility = 'personal';
+
+export interface VerificationTemplate {
+  id: string;
+  name: string;
+  description?: string | null;
+  mode: TemplateMode;
+  /** Personal-only launch: organization sharing is disabled (deny-by-default). */
+  visibility: TemplateVisibility;
+  config_version: number;
+  configuration: TemplateConfigurationV1;
+  source_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TemplateApplySourceBinding {
+  slot: string;
+  file_id: string;
+}
+
+export interface TemplateApplyRequest {
+  project_id: string;
+  sources: TemplateApplySourceBinding[];
+}
+
+export interface TemplateValidationIssue {
+  slot?: string | null;
+  field?: string | null;
+  message: string;
+}
+
+export interface TemplateValidationReport {
+  blocking: boolean;
+  issues: TemplateValidationIssue[];
+  warnings: string[];
+}
+
+export interface TemplateApplyResponse {
+  template_id: string;
+  project_id: string;
+  mode: TemplateMode;
+  /** Effective MultiSourceVerificationRequest (file IDs substituted), ready for
+   *  the existing verification endpoints. */
+  effective_request: MultiSourceVerificationRequest;
+  validation_report: TemplateValidationReport;
+}

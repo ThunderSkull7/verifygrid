@@ -1,25 +1,24 @@
+"""Append-only, tamper-evident audit event model.
+
+Mapped to the ``audit_events`` table created by
+``0004_enterprise_governance``. Batch 26A does not create or alter schema.
+"""
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
-from sqlalchemy import (
-    DateTime,
-    ForeignKey,
-    Integer,
-    JSON,
-    String,
-    Uuid,
-    func,
-)
+
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from app.db.base import Base
 
 
 class AuditEvent(Base):
-    """
-    Append-only tamper-evident audit event log with SHA-256 hash chaining.
-    """
+    """Append-only tamper-evident audit event log with SHA-256 hash chaining."""
+
     __tablename__ = "audit_events"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -62,6 +61,7 @@ class AuditEvent(Base):
     user_role: Mapped[str] = mapped_column(
         String(50),
         default="MAKER",
+        server_default="MAKER",
         nullable=False,
     )
     event_type: Mapped[str] = mapped_column(

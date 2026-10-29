@@ -32,6 +32,14 @@ from app.utils.normalization import (
 DEFAULT_NULL_VALUES = {"", "nan", "none", "null", "n/a", "na", "-", "."}
 
 
+def _enum_value(val: Any) -> Optional[str]:
+    """Return a plain string for enum / string reason codes."""
+    if val is None:
+        return None
+    value = getattr(val, "value", val)
+    return str(value)
+
+
 def check_null(val: Any) -> bool:
     """Check if value represents null/empty."""
     if val is None:
@@ -269,6 +277,7 @@ def build_side_by_side_payload(
             reason_code_val = getattr(diff_obj, "reason_code", None) or (
                 diff_obj.get("reason_code") if isinstance(diff_obj, dict) else None
             )
+            reason_code_val = _enum_value(reason_code_val)
             msg = getattr(diff_obj, "message", None) or (
                 diff_obj.get("message") if isinstance(diff_obj, dict) else None
             )
@@ -295,12 +304,12 @@ def build_side_by_side_payload(
 
     # Failed rule descriptions
     failed_rules: List[Dict[str, Any]] = []
-    reason_code = getattr(item, "reason_code", None)
-    if reason_code and str(reason_code) != "EXACT_MATCH":
+    reason_code = _enum_value(getattr(item, "reason_code", None))
+    if reason_code and reason_code != "EXACT_MATCH":
         failed_rules.append({
-            "rule": str(reason_code),
+            "rule": reason_code,
             "description": getattr(item, "message", None) or f"Exception flagged with reason code {reason_code}",
-            "discrepancy_category": getattr(item, "discrepancy_category", "field_mismatch"),
+            "discrepancy_category": _enum_value(getattr(item, "discrepancy_category", "field_mismatch")),
         })
 
     for cd in comparisons:

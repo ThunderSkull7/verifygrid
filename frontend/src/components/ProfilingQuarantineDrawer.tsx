@@ -27,6 +27,7 @@ interface ProfilingQuarantineDrawerProps {
   projectId: string;
   fileId: string;
   filename: string;
+  worksheet?: string | null;
   isOpen: boolean;
   onClose: () => void;
   onResolutionsUpdated?: () => void;
@@ -36,6 +37,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
   projectId,
   fileId,
   filename,
+  worksheet,
   isOpen,
   onClose,
   onResolutionsUpdated,
@@ -96,7 +98,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
     return () => {
       cancelled = true;
     };
-  }, [isOpen, projectId, fileId]);
+  }, [isOpen, projectId, fileId, worksheet]);
 
   if (!isOpen) return null;
 

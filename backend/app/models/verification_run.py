@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -13,14 +13,11 @@ from sqlalchemy import (
     String,
     Text,
     Uuid,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
-
-if TYPE_CHECKING:
-    from app.models.project import Project
-    from app.models.source_file import SourceFile
 
 
 class VerificationRun(Base):
@@ -99,10 +96,11 @@ class VerificationRun(Base):
         nullable=False,
     )
 
-    # Maker-Checker Governance & Sign-off Lifecycle
+    # Maker-Checker Governance & Sign-off Lifecycle (0004_enterprise_governance)
     sign_off_status: Mapped[str] = mapped_column(
         String(50),
         default="DRAFT",
+        server_default="DRAFT",
         nullable=False,
         index=True,
     )
@@ -238,6 +236,8 @@ class VerificationDiscrepancy(Base):
         Float,
         nullable=True,
     )
+    # Financial materiality, clustering, assignment, and review state
+    # (0004_enterprise_governance).
     source_amount: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
@@ -257,19 +257,22 @@ class VerificationDiscrepancy(Base):
     )
     currency: Mapped[Optional[str]] = mapped_column(
         String(10),
-        nullable=True,
         default="USD",
+        server_default="USD",
+        nullable=True,
     )
     severity: Mapped[Optional[str]] = mapped_column(
         String(20),
-        nullable=True,
         default="medium",
+        server_default="medium",
+        nullable=True,
         index=True,
     )
     resolution_status: Mapped[Optional[str]] = mapped_column(
         String(30),
-        nullable=True,
         default="unresolved",
+        server_default="unresolved",
+        nullable=True,
         index=True,
     )
     resolution_note: Mapped[Optional[str]] = mapped_column(
@@ -349,13 +352,15 @@ class VerificationDiscrepancy(Base):
 
     @property
     def reason_code(self) -> Optional[str]:
+        # Persisted reason code wins for new rows; the derived fallbacks keep
+        # pre-governance rows and the Batch 8 NULL_KEY outcome readable.
         if self._reason_code:
             return self._reason_code
         if self.field_differences:
             for fd in self.field_differences:
                 rc = fd.get("reason_code")
                 if rc:
-                    return rc
+                    return rc.value if hasattr(rc, "value") else rc
         status_to_reason = {
             "identical": "EXACT_MATCH",
             "field_mismatch": "FIELD_MISMATCH",
@@ -371,6 +376,14 @@ class VerificationDiscrepancy(Base):
             "unmatched_split_record": "UNMATCHED_SPLIT_RECORD",
             "duplicate_receipt": "DUPLICATE_RECEIPT",
         }
+        # Batch 14: persists the Batch 8 invalid-key outcome. Such records are
+        # stored as needs_review with a blank component in key_values; fuzzy
+        # review candidates always carry complete, valid keys.
+        if self.match_status == "needs_review" and any(
+            value is None or (isinstance(value, str) and not value.strip())
+            for value in (self.key_values or {}).values()
+        ):
+            return "NULL_KEY"
         return status_to_reason.get(self.match_status, "FIELD_MISMATCH")
 
     @reason_code.setter
@@ -396,6 +409,14 @@ class VerificationDiscrepancy(Base):
 
 
 class DiscrepancyReviewDecision(Base):
+    """Immutable human-review decision for a discrepancy.
+
+    Foreign keys intentionally use ``ON DELETE RESTRICT`` (Batch 24 D8): review
+    decisions are evidence and must not be silently destroyed by a cascade.
+    The table is created by the pending ``0006_discrepancy_review_decisions``
+    migration; Batch 26A only maps it.
+    """
+
     __tablename__ = "discrepancy_review_decisions"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -405,20 +426,20 @@ class DiscrepancyReviewDecision(Base):
     )
     discrepancy_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
-        ForeignKey("verification_discrepancies.id", ondelete="CASCADE"),
+        ForeignKey("verification_discrepancies.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
     run_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,
-        ForeignKey("verification_runs.id", ondelete="CASCADE"),
+        ForeignKey("verification_runs.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
     decision: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
-    )  # APPROVE, REJECT, FORCE_MATCH, ESCALATE, REOPEN
+    )
     justification: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -443,6 +464,7 @@ class DiscrepancyReviewDecision(Base):
     is_bulk_action: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
+        server_default=false(),
         nullable=False,
     )
     cluster_id: Mapped[Optional[str]] = mapped_column(
@@ -464,4 +486,3 @@ class DiscrepancyReviewDecision(Base):
     run: Mapped["VerificationRun"] = relationship(
         "VerificationRun",
     )
-

@@ -1,10 +1,11 @@
-"""Pydantic schemas for exception clustering, bulk human review, and assignments."""
+"""Pydantic schemas for exception clustering, bulk review, and assignment."""
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-import uuid
+
 from pydantic import BaseModel, Field
 
 from app.schemas.result import DiscrepancyItemResponse
@@ -14,7 +15,7 @@ class ExceptionCluster(BaseModel):
     """Grouped exception cluster sharing a deterministic root-cause signature."""
 
     cluster_id: str = Field(..., description="Deterministic cluster hash / identifier")
-    cluster_name: str = Field(..., description="Human-readable cluster description")
+    cluster_name: str = Field(..., max_length=255, description="Human-readable cluster description")
     reason_code: str = Field(..., description="Primary reason code")
     rule_id: Optional[str] = Field(default=None, description="Failed rule identifier if applicable")
     failed_field_names: List[str] = Field(default_factory=list, description="Fields with mismatches")
@@ -56,17 +57,29 @@ class ReviewDecisionRequest(BaseModel):
 
     decision: str = Field(
         ...,
+        max_length=50,
         description="Review decision: APPROVE, REJECT, FORCE_MATCH, ESCALATE, or REOPEN",
         examples=["APPROVE"],
     )
     justification: str = Field(
         ...,
         min_length=1,
+        max_length=10000,
         description="Mandatory auditor or reviewer justification note",
         examples=["Approved difference: within business grace period."],
     )
-    reviewer_id: Optional[str] = Field(default=None, description="Reviewer identifier")
-    reviewer_email: Optional[str] = Field(default=None, description="Reviewer email")
+    # Retained for wire compatibility only. Reviewer identity is derived from
+    # the authenticated principal and these values are ignored.
+    reviewer_id: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Deprecated: ignored; authenticated reviewer identity is used.",
+    )
+    reviewer_email: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="Deprecated: ignored; authenticated reviewer identity is used.",
+    )
 
 
 class ReviewDecisionItem(BaseModel):
@@ -91,23 +104,28 @@ class BulkReviewRequest(BaseModel):
 
     decision: str = Field(
         ...,
+        max_length=50,
         description="Bulk decision: APPROVE, REJECT, FORCE_MATCH, ESCALATE, or REOPEN",
     )
     justification: str = Field(
         ...,
         min_length=1,
+        max_length=10000,
         description="Mandatory justification note explaining the bulk action",
     )
     cluster_id: Optional[str] = Field(
         default=None,
+        max_length=64,
         description="Target cluster ID to resolve all constituent records",
     )
     discrepancy_ids: Optional[List[str]] = Field(
         default=None,
+        max_length=1000,
         description="Explicit list of discrepancy IDs to resolve",
     )
     max_exposure_threshold: Optional[float] = Field(
         default=None,
+        ge=0.0,
         description="Maximum allowed exposure per record for bulk approval safeguard",
     )
     allow_blocking_override: bool = Field(
@@ -129,12 +147,21 @@ class BulkReviewResponse(BaseModel):
 
 
 class AssignmentRequest(BaseModel):
-    """Assign records or a whole cluster to a reviewer."""
+    """Assign records or a whole cluster to a reviewer.
 
-    reviewer_id: str = Field(..., description="Target reviewer user ID or email")
-    reviewer_email: Optional[str] = Field(default=None, description="Reviewer email")
-    cluster_id: Optional[str] = Field(default=None, description="Assign all records in cluster")
-    discrepancy_ids: Optional[List[str]] = Field(default=None, description="Assign specific discrepancy IDs")
+    ``assigned_to`` is ``varchar(100)`` in the canonical schema, so both
+    identifier fields are bounded to reject overlong values with 422 instead
+    of surfacing a database ``DataError``.
+    """
+
+    reviewer_id: str = Field(..., min_length=1, max_length=100, description="Target reviewer user ID or email")
+    reviewer_email: Optional[str] = Field(default=None, max_length=100, description="Reviewer email")
+    cluster_id: Optional[str] = Field(default=None, max_length=64, description="Assign all records in cluster")
+    discrepancy_ids: Optional[List[str]] = Field(
+        default=None,
+        max_length=1000,
+        description="Assign specific discrepancy IDs",
+    )
 
 
 class AssignmentResponse(BaseModel):

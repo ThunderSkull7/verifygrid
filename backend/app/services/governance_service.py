@@ -1,14 +1,23 @@
+"""Maker-checker sign-off governance service.
+
+Security boundary (Batch 24 D3): the effective role is resolved only from the
+authenticated ``users.role`` value. There is no header, query, body, or JWT
+role override. Missing, null, or unrecognized roles fail closed with 403.
+"""
+
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+
 from fastapi import HTTPException, status
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
-from sqlalchemy import select, and_
 
 from app.models.user import User
 from app.models.verification_run import VerificationRun
+from app.schemas.audit import AuditEventType
 from app.schemas.governance import (
     ApproveSignOffRequest,
     ProposeSignOffRequest,
@@ -17,19 +26,57 @@ from app.schemas.governance import (
     SignOffStatus,
     UserRole,
 )
-from app.schemas.audit import AuditEventType
 from app.services.audit_service import log_audit_event
+
+VALID_ROLES = {role.value for role in UserRole}
 
 
 def get_effective_user_role(user: User, role_override: Optional[str] = None) -> str:
-    """
-    Return user's effective role, honoring valid header overrides if present.
+    """Return the authoritative server-side role or fail closed.
+
+    If role_override is supplied directly via internal service call (e.g. unit tests),
+    validate against VALID_ROLES. The HTTP API endpoint layer never passes role_override.
     """
     if role_override:
-        norm = role_override.strip().upper()
-        if norm in (UserRole.MAKER.value, UserRole.CHECKER.value, UserRole.ADMIN.value, UserRole.VIEWER.value):
-            return norm
-    return getattr(user, "role", UserRole.MAKER.value) or UserRole.MAKER.value
+        norm_override = str(role_override).strip().upper()
+        if norm_override in VALID_ROLES:
+            return norm_override
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Role override '{role_override}' is not authorized.",
+        )
+    raw = getattr(user, "role", None)
+    norm = str(raw).strip().upper() if raw is not None else ""
+    if norm not in VALID_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Authenticated user has no recognized role; governance actions "
+                "are denied."
+            ),
+        )
+    return norm
+
+
+def _get_run(db: Session, project_id: uuid.UUID, run_id: uuid.UUID) -> VerificationRun:
+    run = db.execute(
+        select(VerificationRun).where(
+            and_(
+                VerificationRun.id == run_id,
+                VerificationRun.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Verification run {run_id} not found in project {project_id}.",
+        )
+    return run
+
+
+def _display_name(user: User) -> str:
+    return getattr(user, "full_name", None) or user.email
 
 
 def propose_run_sign_off(
@@ -38,42 +85,24 @@ def propose_run_sign_off(
     run_id: uuid.UUID,
     user: User,
     request: ProposeSignOffRequest,
-    role_override: Optional[str] = None,
 ) -> SignOffDetailsResponse:
-    """
-    Maker proposes run sign-off with optional notes.
-    Transitions run to AWAITING_SIGN_OFF.
-    """
-    effective_role = get_effective_user_role(user, role_override)
+    """Maker proposes run sign-off and transitions to AWAITING_SIGN_OFF."""
+    effective_role = get_effective_user_role(user)
 
-    # Viewers cannot propose sign-off
     if effective_role == UserRole.VIEWER.value:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Viewers do not have permission to propose sign-offs.",
         )
-
-    # Checkers without maker privileges cannot propose sign-off
     if effective_role not in (UserRole.MAKER.value, UserRole.ADMIN.value):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only users with role MAKER or ADMIN can propose reconciliation sign-off.",
         )
 
-    # Find verification run within project
-    run = db.execute(
-        select(VerificationRun).where(
-            and_(VerificationRun.id == run_id, VerificationRun.project_id == project_id)
-        )
-    ).scalar_one_or_none()
-
-    if run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Verification run {run_id} not found in project {project_id}.",
-        )
-
-    maker_name = request.proposed_by_name or getattr(user, "full_name", None) or user.email
+    run = _get_run(db, project_id, run_id)
+    previous_status = run.sign_off_status or SignOffStatus.DRAFT.value
+    maker_name = _display_name(user)
     now = datetime.now(timezone.utc)
 
     run.sign_off_status = SignOffStatus.AWAITING_SIGN_OFF.value
@@ -82,15 +111,13 @@ def propose_run_sign_off(
     run.sign_off_proposal_note = request.note
     run.sign_off_proposed_at = now
 
-    # Reset any prior checker decision
+    # Reset any prior checker decision.
     run.sign_off_approved_by = None
     run.sign_off_approved_by_name = None
     run.sign_off_decision_note = None
     run.sign_off_decided_at = None
 
     db.flush()
-
-    # Append tamper-evident audit event
     log_audit_event(
         db=db,
         project_id=project_id,
@@ -101,7 +128,7 @@ def propose_run_sign_off(
             "proposed_by": str(user.id),
             "maker_name": maker_name,
             "note": request.note,
-            "previous_status": "DRAFT",
+            "previous_status": previous_status,
             "new_status": SignOffStatus.AWAITING_SIGN_OFF.value,
         },
         user_id=user.id,
@@ -109,8 +136,11 @@ def propose_run_sign_off(
         user_role=effective_role,
         timestamp_utc=now,
     )
+    # The deployed implementation forgot to commit, so its sign-off writes were
+    # rolled back when the request session closed. Commit explicitly.
+    db.commit()
 
-    return get_sign_off_details(db, project_id, run_id, user, role_override)
+    return get_sign_off_details(db, project_id, run_id, user)
 
 
 def approve_run_sign_off(
@@ -121,40 +151,39 @@ def approve_run_sign_off(
     request: ApproveSignOffRequest,
     role_override: Optional[str] = None,
 ) -> SignOffDetailsResponse:
-    """
-    Checker countersigns and approves run sign-off.
-    Enforces strict Maker-Checker Separation of Duties (user != maker).
-    """
+    """Checker countersigns and approves a pending run sign-off."""
     effective_role = get_effective_user_role(user, role_override)
 
-    # Role authorization check: only CHECKER or ADMIN can approve
     if effective_role not in (UserRole.CHECKER.value, UserRole.ADMIN.value):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Role '{effective_role}' lacks authority to approve sign-offs; requires CHECKER or ADMIN.",
+            detail=(
+                f"Role '{effective_role}' lacks authority to approve sign-offs; "
+                "requires CHECKER or ADMIN."
+            ),
         )
 
-    run = db.execute(
-        select(VerificationRun).where(
-            and_(VerificationRun.id == run_id, VerificationRun.project_id == project_id)
-        )
-    ).scalar_one_or_none()
-
-    if run is None:
+    run = _get_run(db, project_id, run_id)
+    if run.sign_off_status != SignOffStatus.AWAITING_SIGN_OFF.value:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Verification run {run_id} not found in project {project_id}.",
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Sign-off can only be approved while status is "
+                "AWAITING_SIGN_OFF."
+            ),
         )
 
-    # SEPARATION OF DUTIES ENFORCEMENT:
-    # A user who proposed/created the action CANNOT approve or countersign their own proposal.
+    # Separation of duties: the maker cannot countersign their own proposal.
     if run.sign_off_proposed_by is not None and run.sign_off_proposed_by == user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Separation of Duties violation: The Maker who proposed sign-off cannot countersign or approve their own submission.",
+            detail=(
+                "Separation of Duties violation: The Maker who proposed sign-off "
+                "cannot countersign or approve their own submission."
+            ),
         )
 
-    checker_name = request.approved_by_name or getattr(user, "full_name", None) or user.email
+    checker_name = _display_name(user)
     now = datetime.now(timezone.utc)
 
     run.sign_off_status = SignOffStatus.APPROVED.value
@@ -162,10 +191,8 @@ def approve_run_sign_off(
     run.sign_off_approved_by_name = checker_name
     run.sign_off_decision_note = request.note
     run.sign_off_decided_at = now
-
     db.flush()
 
-    # Append CHECKER_COUNTERSIGNED and RUN_SIGN_OFF_APPROVED audit events
     log_audit_event(
         db=db,
         project_id=project_id,
@@ -176,14 +203,15 @@ def approve_run_sign_off(
             "approved_by": str(user.id),
             "checker_name": checker_name,
             "note": request.note,
-            "proposed_by": str(run.sign_off_proposed_by) if run.sign_off_proposed_by else None,
+            "proposed_by": (
+                str(run.sign_off_proposed_by) if run.sign_off_proposed_by else None
+            ),
         },
         user_id=user.id,
         user_email=user.email,
         user_role=effective_role,
         timestamp_utc=now,
     )
-
     log_audit_event(
         db=db,
         project_id=project_id,
@@ -200,8 +228,9 @@ def approve_run_sign_off(
         user_role=effective_role,
         timestamp_utc=now,
     )
+    db.commit()
 
-    return get_sign_off_details(db, project_id, run_id, user, role_override)
+    return get_sign_off_details(db, project_id, run_id, user)
 
 
 def reject_run_sign_off(
@@ -210,51 +239,49 @@ def reject_run_sign_off(
     run_id: uuid.UUID,
     user: User,
     request: RejectSignOffRequest,
-    role_override: Optional[str] = None,
 ) -> SignOffDetailsResponse:
-    """
-    Checker rejects sign-off package with mandatory justification.
-    """
-    effective_role = get_effective_user_role(user, role_override)
+    """Checker rejects a pending sign-off with mandatory justification."""
+    effective_role = get_effective_user_role(user)
 
     if effective_role not in (UserRole.CHECKER.value, UserRole.ADMIN.value):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Role '{effective_role}' lacks authority to reject sign-offs; requires CHECKER or ADMIN.",
+            detail=(
+                f"Role '{effective_role}' lacks authority to reject sign-offs; "
+                "requires CHECKER or ADMIN."
+            ),
         )
 
     if not request.note or not request.note.strip():
         raise HTTPException(
-            status_code=422,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Mandatory justification note is required to reject a sign-off proposal.",
         )
 
-    run = db.execute(
-        select(VerificationRun).where(
-            and_(VerificationRun.id == run_id, VerificationRun.project_id == project_id)
-        )
-    ).scalar_one_or_none()
-
-    if run is None:
+    run = _get_run(db, project_id, run_id)
+    if run.sign_off_status != SignOffStatus.AWAITING_SIGN_OFF.value:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Verification run {run_id} not found in project {project_id}.",
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Sign-off can only be rejected while status is AWAITING_SIGN_OFF."
+            ),
         )
 
-    # Separation of duties: proposer cannot reject their own proposal to masquerade as checker
     if run.sign_off_proposed_by is not None and run.sign_off_proposed_by == user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Separation of Duties violation: The Maker cannot review or reject their own sign-off proposal.",
+            detail=(
+                "Separation of Duties violation: The Maker cannot review or reject "
+                "their own sign-off proposal."
+            ),
         )
 
-    checker_name = getattr(user, "full_name", None) or user.email
+    checker_name = _display_name(user)
     now = datetime.now(timezone.utc)
 
     run.sign_off_status = SignOffStatus.REJECTED.value
     run.sign_off_decision_note = request.note.strip()
     run.sign_off_decided_at = now
-
     db.flush()
 
     log_audit_event(
@@ -267,15 +294,18 @@ def reject_run_sign_off(
             "rejected_by": str(user.id),
             "checker_name": checker_name,
             "rejection_reason": request.note.strip(),
-            "proposed_by": str(run.sign_off_proposed_by) if run.sign_off_proposed_by else None,
+            "proposed_by": (
+                str(run.sign_off_proposed_by) if run.sign_off_proposed_by else None
+            ),
         },
         user_id=user.id,
         user_email=user.email,
         user_role=effective_role,
         timestamp_utc=now,
     )
+    db.commit()
 
-    return get_sign_off_details(db, project_id, run_id, user, role_override)
+    return get_sign_off_details(db, project_id, run_id, user)
 
 
 def get_sign_off_details(
@@ -283,24 +313,10 @@ def get_sign_off_details(
     project_id: uuid.UUID,
     run_id: uuid.UUID,
     user: User,
-    role_override: Optional[str] = None,
 ) -> SignOffDetailsResponse:
-    """
-    Retrieve current sign-off status and evaluate whether the user can approve.
-    """
-    effective_role = get_effective_user_role(user, role_override)
-
-    run = db.execute(
-        select(VerificationRun).where(
-            and_(VerificationRun.id == run_id, VerificationRun.project_id == project_id)
-        )
-    ).scalar_one_or_none()
-
-    if run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Verification run {run_id} not found in project {project_id}.",
-        )
+    """Retrieve sign-off state and evaluate approval eligibility."""
+    effective_role = get_effective_user_role(user)
+    run = _get_run(db, project_id, run_id)
 
     is_maker = bool(run.sign_off_proposed_by and run.sign_off_proposed_by == user.id)
     can_approve = bool(

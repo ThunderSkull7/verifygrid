@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, Monitor, Moon, Palette, Sun } from 'lucide-react';
+import { Check, Moon, Palette, Sun } from 'lucide-react';
 import { useTheme } from '../context/useTheme';
-import type { AccentColorKey, ThemeMode } from '../context/themeContextDef';
+import type { ThemeMode } from '../context/themeContextDef';
 
 interface AppearanceControlProps {
   /** 'sidebar' renders a full-width labelled button, 'compact' an icon-only button. */
@@ -11,23 +11,10 @@ interface AppearanceControlProps {
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: React.ComponentType<{ size?: number }> }[] = [
   { value: 'light', label: 'Light', icon: Sun },
   { value: 'dark', label: 'Dark', icon: Moon },
-  { value: 'system', label: 'System', icon: Monitor },
-];
-
-const ACCENT_OPTIONS: { value: AccentColorKey; label: string; color: string }[] = [
-  { value: 'green', label: 'Green', color: '#10b981' },
-  { value: 'blue', label: 'Blue', color: '#3b82f6' },
-  { value: 'indigo', label: 'Indigo', color: '#6366f1' },
-  { value: 'purple', label: 'Purple', color: '#a855f7' },
-  { value: 'teal', label: 'Teal', color: '#14b8a6' },
-  { value: 'cyan', label: 'Cyan', color: '#06b6d4' },
-  { value: 'orange', label: 'Orange', color: '#f97316' },
-  { value: 'rose', label: 'Rose', color: '#f43f5e' },
-  { value: 'neutral', label: 'Slate', color: '#64748b' },
 ];
 
 export const AppearanceControl: React.FC<AppearanceControlProps> = ({ variant = 'sidebar' }) => {
-  const { theme, resolvedTheme, accent, setTheme, setAccent } = useTheme();
+  const { theme, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -41,8 +28,7 @@ export const AppearanceControl: React.FC<AppearanceControlProps> = ({ variant = 
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [open]);
 
-  const themeLabel = THEME_OPTIONS.find((o) => o.value === theme)?.label ?? 'System';
-  const accentLabel = ACCENT_OPTIONS.find((o) => o.value === accent)?.label ?? 'Green';
+  const themeLabel = THEME_OPTIONS.find((o) => o.value === theme)?.label ?? 'Light';
 
   return (
     <div className="appearance-wrap" ref={wrapRef}>
@@ -57,9 +43,7 @@ export const AppearanceControl: React.FC<AppearanceControlProps> = ({ variant = 
         >
           <Palette size={16} />
           <span className="appearance-btn-label">Appearance</span>
-          <span className="appearance-btn-value">
-            {accentLabel} · {themeLabel}
-          </span>
+          <span className="appearance-btn-value">{themeLabel}</span>
         </button>
       ) : (
         <button
@@ -71,7 +55,7 @@ export const AppearanceControl: React.FC<AppearanceControlProps> = ({ variant = 
           aria-label="Appearance settings"
           title="Appearance settings"
         >
-          {resolvedTheme === 'dark' ? <Moon size={17} /> : <Sun size={17} />}
+          {theme === 'dark' ? <Moon size={17} /> : <Sun size={17} />}
         </button>
       )}
 
@@ -104,32 +88,9 @@ export const AppearanceControl: React.FC<AppearanceControlProps> = ({ variant = 
               </div>
             </div>
 
-            <div className="appearance-section">
-              <span className="appearance-label" id="vg-accent-label">
-                Accent colour
-              </span>
-              <div className="accent-grid" role="radiogroup" aria-labelledby="vg-accent-label">
-                {ACCENT_OPTIONS.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    role="radio"
-                    aria-checked={accent === option.value}
-                    aria-label={option.label}
-                    title={option.label}
-                    className={`accent-swatch ${accent === option.value ? 'selected' : ''}`}
-                    style={{ '--swatch': option.color } as React.CSSProperties}
-                    onClick={() => setAccent(option.value)}
-                  />
-                ))}
-              </div>
-            </div>
-
             <div className="appearance-current-note">
               <Check size={13} />
-              <span>
-                {accentLabel} accent · {resolvedTheme === 'dark' ? 'Dark' : 'Light'} theme active
-              </span>
+              <span>{themeLabel} theme active</span>
             </div>
           </div>
         </>
