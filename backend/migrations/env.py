@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import socket
 import sys
 from logging.config import fileConfig
@@ -46,8 +47,29 @@ target_metadata = Base.metadata
 
 INTEGRATION_ENV = "VERIFYGRID_RUN_POSTGRES_INTEGRATION_TESTS"
 MIGRATION_URL_ENV = "VERIFYGRID_MIGRATION_DATABASE_URL"
-ALLOW_REMOTE_ENV = "VERIFYGRID_ALLOW_PRODUCTION_MIGRATION"
-ACK_ENV = "VERIFYGRID_PRODUCTION_MIGRATION_ACK"
+
+# Separate Staging Authorization Path
+ALLOW_STAGING_ENV = "VERIFYGRID_ALLOW_STAGING_MIGRATION"
+STAGING_ACK_ENV = "VERIFYGRID_STAGING_MIGRATION_ACK"
+STAGING_ENDPOINT_ENV = "VERIFYGRID_STAGING_ENDPOINT_ID"
+
+# Separate Production Authorization Path
+ALLOW_PRODUCTION_ENV = "VERIFYGRID_ALLOW_PRODUCTION_MIGRATION"
+PRODUCTION_ACK_ENV = "VERIFYGRID_PRODUCTION_MIGRATION_ACK"
+PRODUCTION_ENDPOINT_ENV = "VERIFYGRID_PRODUCTION_ENDPOINT_ID"
+
+# Backward-compatibility aliases
+ALLOW_REMOTE_ENV = ALLOW_PRODUCTION_ENV
+ACK_ENV = PRODUCTION_ACK_ENV
+
+KNOWN_PRODUCTION_ENDPOINT = "ep-round-sea-b3b78mtc"
+NEON_DATABASE_NAME = "neondb"
+NEON_ROLE_NAME = "neondb_owner"
+
+NEON_HOST_RE = re.compile(
+    r"^ep-[a-z0-9-]+(?:\.c-[0-9]+)?(?:\.[a-z0-9-]+)?\.aws\.neon\.tech$|^ep-[a-z0-9-]+\.neon\.tech$",
+    re.IGNORECASE,
+)
 
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 SYSTEM_DATABASES = frozenset({"postgres", "template0", "template1"})
@@ -59,6 +81,17 @@ TEST_DISALLOWED_DATABASES = frozenset(
 REDIRECT_QUERY_KEYS = frozenset(
     {"host", "hostaddr", "port", "dbname", "database", "user", "service", "servicefile"}
 )
+
+
+def extract_endpoint_id(host: Optional[str]) -> Optional[str]:
+    """Extract Neon endpoint identifier from hostname if starting with ep-."""
+    if not host:
+        return None
+    cleaned = host.strip().strip("[]").lower()
+    if "-pooler" in cleaned:
+        return None
+    first_part = cleaned.split(".")[0]
+    return first_part if first_part.startswith("ep-") else None
 
 
 class MigrationTargetError(RuntimeError):
@@ -150,11 +183,17 @@ def _parse_url(raw_url: Optional[str]) -> URL:
 def validate_target_url(
     raw_url: Optional[str],
     env: Optional[Mapping[str, str]] = None,
+    x_args: Optional[Mapping[str, str]] = None,
 ) -> tuple[URL, bool]:
-    """Validate an explicit CLI/offline URL.
+    """Validate an explicit CLI/offline URL with target-bound authorization.
 
-    Returns ``(url, is_loopback)``. A non-loopback URL is rejected unless both
-    production guard variables are present.
+    Returns ``(url, is_loopback)``.
+    - Loopback hosts are permitted for local development and integration tests.
+    - Staging targets require VERIFYGRID_ALLOW_STAGING_MIGRATION=1, valid Neon direct
+      hostname, endpoint matching, and VERIFYGRID_STAGING_MIGRATION_ACK.
+    - Production targets require VERIFYGRID_ALLOW_PRODUCTION_MIGRATION=1, exact
+      production endpoint matching, and VERIFYGRID_PRODUCTION_MIGRATION_ACK.
+    - Conflicting, ambiguous, pooled, or unacknowledged targets fail closed.
     """
     url = _parse_url(raw_url)
     host = (url.host or "").strip().strip("[]").lower()
@@ -166,17 +205,129 @@ def validate_target_url(
                 "The migration target host did not resolve exclusively to "
                 "loopback addresses."
             )
-    else:
-        allowed = _enabled(ALLOW_REMOTE_ENV, env)
-        acknowledgement = ((_environment(env).get(ACK_ENV)) or "").strip()
-        if not (allowed and acknowledgement):
+        return url, True
+
+    # Remote target authorization
+    env_dict = _environment(env)
+    x_dict = x_args or {}
+
+    is_staging = (
+        _enabled(ALLOW_STAGING_ENV, env_dict)
+        or (x_dict.get("allow_staging") or "").strip().lower() in {"1", "true", "yes", "on"}
+        or (x_dict.get("target") or "").strip().lower() == "staging"
+    )
+
+    is_production = (
+        _enabled(ALLOW_PRODUCTION_ENV, env_dict)
+        or (x_dict.get("allow_production") or "").strip().lower() in {"1", "true", "yes", "on"}
+        or (x_dict.get("target") or "").strip().lower() == "production"
+    )
+
+    if is_staging and is_production:
+        raise MigrationTargetError(
+            "Conflicting authorization: both staging and production migrations are enabled. "
+            "Specify exactly one target."
+        )
+
+    if not (is_staging or is_production):
+        raise MigrationTargetError(
+            "Refusing a non-loopback migration target. Remote migrations require explicit authorization: "
+            f"set {ALLOW_STAGING_ENV}=1 for staging, or {ALLOW_PRODUCTION_ENV}=1 for production."
+        )
+
+    if "-pooler" in host:
+        raise MigrationTargetError(
+            f"Target host '{host}' is a pooled endpoint. "
+            "Pooled endpoints cannot be used for schema migrations; use the direct compute endpoint instead."
+        )
+
+    if not NEON_HOST_RE.match(host):
+        raise MigrationTargetError(
+            f"Target host '{host}' does not match the permitted Neon direct hostname pattern "
+            "(must start with 'ep-' and end with '.neon.tech')."
+        )
+
+    endpoint_id = host.split(".")[0].strip().lower()
+
+    if is_staging:
+        if endpoint_id == KNOWN_PRODUCTION_ENDPOINT:
             raise MigrationTargetError(
-                "Refusing a non-loopback migration target. Set both "
-                f"{ALLOW_REMOTE_ENV}=1 and {ACK_ENV}=<change-ticket-id> only for "
-                "an authorized production migration."
+                f"Refusing staging migration against known production endpoint '{KNOWN_PRODUCTION_ENDPOINT}'. "
+                "Staging authorization cannot be used for production targets."
             )
 
-    return url, loopback
+        staging_ack = (
+            (x_dict.get("staging_ack") or x_dict.get("ack") or env_dict.get(STAGING_ACK_ENV) or "")
+        ).strip()
+        if not staging_ack:
+            raise MigrationTargetError(
+                "Staging migration requires a target-bound acknowledgement. "
+                f"Set {STAGING_ACK_ENV}=<staging-endpoint-id> or supply -x ack=<staging-endpoint-id>."
+            )
+
+        expected_staging_endpoint = (
+            (x_dict.get("staging_endpoint_id") or x_dict.get("endpoint_id") or env_dict.get(STAGING_ENDPOINT_ENV) or "")
+        ).strip().lower()
+        if expected_staging_endpoint and expected_staging_endpoint != endpoint_id:
+            raise MigrationTargetError(
+                f"Target endpoint '{endpoint_id}' does not match expected staging endpoint '{expected_staging_endpoint}'."
+            )
+
+        if staging_ack.lower() != endpoint_id:
+            raise MigrationTargetError(
+                f"Staging acknowledgement '{staging_ack}' does not match target endpoint ID '{endpoint_id}'."
+            )
+
+        db_name = (url.database or "").strip().lower()
+        user_name = (url.username or "").strip().lower()
+        if db_name != NEON_DATABASE_NAME:
+            raise MigrationTargetError(
+                f"Invalid staging database name '{url.database}'; expected '{NEON_DATABASE_NAME}'."
+            )
+        if user_name != NEON_ROLE_NAME:
+            raise MigrationTargetError(
+                f"Invalid staging database role '{url.username}'; expected '{NEON_ROLE_NAME}'."
+            )
+
+    if is_production:
+        expected_prod_endpoint = (
+            (x_dict.get("production_endpoint_id") or x_dict.get("endpoint_id") or env_dict.get(PRODUCTION_ENDPOINT_ENV) or "")
+        ).strip().lower() or KNOWN_PRODUCTION_ENDPOINT
+
+        if endpoint_id != expected_prod_endpoint:
+            raise MigrationTargetError(
+                f"Production migration target endpoint '{endpoint_id}' does not match "
+                f"expected production endpoint '{expected_prod_endpoint}'."
+            )
+
+        prod_ack = (
+            (x_dict.get("production_ack") or x_dict.get("ack") or env_dict.get(PRODUCTION_ACK_ENV) or "")
+        ).strip()
+        if not prod_ack:
+            raise MigrationTargetError(
+                "Production migration requires an explicit target-bound acknowledgement. "
+                f"Set {PRODUCTION_ACK_ENV}=<production-endpoint-id> or supply -x ack=<production-endpoint-id>."
+            )
+
+        valid_acks = {expected_prod_endpoint, f"confirm-production-{expected_prod_endpoint}"}
+        if prod_ack.lower() not in valid_acks:
+            raise MigrationTargetError(
+                f"Production acknowledgement '{prod_ack}' does not match required endpoint confirmation "
+                f"('{expected_prod_endpoint}' or 'CONFIRM-PRODUCTION-{expected_prod_endpoint}')."
+            )
+
+        db_name = (url.database or "").strip().lower()
+        user_name = (url.username or "").strip().lower()
+        if db_name != NEON_DATABASE_NAME:
+            raise MigrationTargetError(
+                f"Invalid production database name '{url.database}'; expected '{NEON_DATABASE_NAME}'."
+            )
+        if user_name != NEON_ROLE_NAME:
+            raise MigrationTargetError(
+                f"Invalid production database role '{url.username}'; expected '{NEON_ROLE_NAME}'."
+            )
+
+    return url, False
 
 
 def validate_test_connection_url(url: URL) -> None:
@@ -238,7 +389,7 @@ def select_explicit_url(
             f"{MIGRATION_URL_ENV}. Application configuration and .env are never "
             "used as a migration target."
         )
-    return validate_target_url(raw_url, env)
+    return validate_target_url(raw_url, env, x_args=x_args)
 
 
 def _assert_server_identity(
@@ -292,6 +443,30 @@ def _assert_server_identity(
             "The migration target is non-loopback but the server reported a "
             "loopback address; refusing an ambiguous target."
         )
+
+    # Post-connection Neon endpoint identity verification
+    if not require_loopback and url.host:
+        endpoint_id = extract_endpoint_id(url.host)
+        if endpoint_id:
+            try:
+                res = connection.execute(text("SELECT current_setting('neon.endpoint_id', true)"))
+                neon_endpoint = None
+                if hasattr(res, "scalar_one_or_none"):
+                    neon_endpoint = res.scalar_one_or_none()
+                elif hasattr(res, "one"):
+                    r = res.one()
+                    neon_endpoint = r[0] if isinstance(r, (tuple, list)) else r
+                if neon_endpoint:
+                    ep_str = str(neon_endpoint).strip().lower()
+                    if ep_str.startswith("ep-") and ep_str != endpoint_id.lower():
+                        raise MigrationTargetError(
+                            f"Connected Neon endpoint '{neon_endpoint}' does not match "
+                            f"expected target endpoint '{endpoint_id}'."
+                        )
+            except MigrationTargetError:
+                raise
+            except Exception:
+                pass
 
 
 def _validate_programmatic_url(url: URL) -> bool:

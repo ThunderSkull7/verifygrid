@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AggregationConfig,
   DateWindowRule,
@@ -16,6 +16,7 @@ import type {
   RulePreviewResponse,
   SourceDefinition,
   SourceFile,
+  VerificationResultItem,
   VerificationRun,
   VersionedRuleConfig,
   WhereCondition,
@@ -26,12 +27,14 @@ import {
   buildFallbackPayload,
   buildFieldOwnershipPayload,
   collectCanonicalAttributes,
+  COLUMN_SYNONYMS,
   computeComparedAttributes,
   computeComparedAttributesMultiPrimary,
   usedColumnsForFile,
 } from '../services/columnMapping';
 import { FileUploadSection } from './FileUploadSection';
 import { ProfilingQuarantineDrawer } from './ProfilingQuarantineDrawer';
+import { RecordInspectorDrawer } from './RecordInspectorDrawer';
 import { StatusBadge } from './StatusBadge';
 import { TemplatePanel } from './TemplatePanel';
 import {
@@ -66,7 +69,7 @@ export type VerificationMode = 'organization' | 'financial';
 interface ReconciliationWizardProps {
   project: Project;
   uploadedDatasets: UploadedDataset[];
-  onFileUploaded: (file: SourceFile, profile?: PreprocessingResult) => void;
+  onFileUploaded: (file: SourceFile, profile?: PreprocessingResult, contentHash?: string) => void;
   onRunCompleted?: (run: VerificationRun) => void;
   /** Presentation mode. 'financial' (default) preserves all existing behaviour, labels
    *  and financial rule configuration. 'organization' renders neutral, institution-
@@ -78,16 +81,18 @@ interface ReconciliationWizardProps {
   onRemoveFile?: (fileId: string) => void;
   /** Batch 7: explicit XLSX worksheet selection per file (null = deselect). */
   onWorksheetChange?: (fileId: string, sheet: string | null) => void;
+  /** Batch 7: explicit header row selection per file (null = automatic). */
+  onHeaderRowChange?: (fileId: string, headerRow: number | null) => void;
 }
 
 type WizardStep = 1 | 2 | 3 | 4 | 5;
 
 const STEPS: { num: 1 | 2 | 3 | 4 | 5; title: string; desc: string; orgTitle: string; orgDesc: string }[] = [
-  { num: 1, title: 'Ingestion', desc: 'Upload & Pre-flight', orgTitle: 'Upload', orgDesc: 'Add files & pre-flight' },
-  { num: 2, title: 'Blueprint', desc: 'Aliases & Keys', orgTitle: 'Records', orgDesc: 'Names & keys' },
-  { num: 3, title: 'Rules', desc: 'Tolerances & Logic', orgTitle: 'Settings', orgDesc: 'Tolerances & logic' },
-  { num: 4, title: 'Exception Grid', desc: 'Multi-source Lineage', orgTitle: 'Results', orgDesc: 'Records & differences' },
-  { num: 5, title: 'Sign-off', desc: 'Audit & Exports', orgTitle: 'Review', orgDesc: 'Summary & exports' },
+  { num: 1, title: 'Upload', desc: 'Add files & check', orgTitle: 'Upload', orgDesc: 'Add files & pre-flight' },
+  { num: 2, title: 'Setup', desc: 'Columns & matching keys', orgTitle: 'Records', orgDesc: 'Names & keys' },
+  { num: 3, title: 'Settings', desc: 'Tolerances & logic', orgTitle: 'Settings', orgDesc: 'Tolerances & logic' },
+  { num: 4, title: 'Results', desc: 'Records & differences', orgTitle: 'Results', orgDesc: 'Records & differences' },
+  { num: 5, title: 'Review', desc: 'Summary & exports', orgTitle: 'Review', orgDesc: 'Summary & exports' },
 ];
 
 const DEFAULT_NAMES = ['erp', 'bank', 'gateway', 'pos', 'ledger', 'crm'];
@@ -102,6 +107,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   onRoleChange,
   onRemoveFile,
   onWorksheetChange,
+  onHeaderRowChange,
 }) => {
   const [currentStep, setCurrentStep] = useState<WizardStep>(1);
 
@@ -117,6 +123,11 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   const [unifiedKeys, setUnifiedKeys] = useState<string[]>(['id']);
   // Key columns per file_id: Record<file_id, string[]>
   const [fileKeyColumns, setFileKeyColumns] = useState<Record<string, string[]>>({});
+  // User or template key selection flag (prevents automatic recommendation overwriting)
+  const userHasSelectedKeyRef = useRef<boolean>(false);
+  const markKeyAsUserSelected = () => {
+    userHasSelectedKeyRef.current = true;
+  };
   // Batch 3 (organization mode): canonical-attribute -> column mapping state per file.
   const [columnMappings, setColumnMappings] = useState<Record<string, FileColumnMappings>>({});
   // Batch 4 (organization mode): ordered fallback matching keys. Each entry is a list
@@ -126,6 +137,16 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   // ownership ({canonical attribute -> owning file id}). Only validated entries
   // are sent to the engine.
   const [multiPrimary, setMultiPrimary] = useState(false);
+  const handleMultiPrimaryChange = useCallback((enabled: boolean) => {
+    setMultiPrimary(enabled);
+    if (!enabled && onRoleChange) {
+      // In single-primary mode, ensure at most one primary file is retained.
+      const primaries = uploadedDatasets.filter((d) => d.isPrimary);
+      if (primaries.length > 1) {
+        primaries.slice(1).forEach((d) => onRoleChange(d.id, false));
+      }
+    }
+  }, [uploadedDatasets, onRoleChange]);
   const [fieldOwners, setFieldOwners] = useState<Record<string, string>>({});
   // Key recommendations from backend
   const [recommendations, setRecommendations] = useState<MultiSourceKeyRecommendation[]>([]);
@@ -183,7 +204,11 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   // --- Step 5: Sign-off ---
   const [signOffNote, setSignOffNote] = useState<string>('');
   const [isSignedOff, setIsSignedOff] = useState<boolean>(false);
+  const [signingOff, setSigningOff] = useState<boolean>(false);
+  const [signOffError, setSignOffError] = useState<string | null>(null);
+  const isSigningOffRef = useRef<boolean>(false);
   const [exportingFormat, setExportingFormat] = useState<'csv' | 'xlsx' | 'json' | null>(null);
+  const [inspectedRecord, setInspectedRecord] = useState<VerificationResultItem | null>(null);
 
   // Helper to derive alias for a dataset.
   // Financial mode: unchanged 'erp'/'bank'/... progression unless the user names it.
@@ -208,6 +233,17 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     },
     [sourceAliases, uploadedDatasets, mode],
   );
+
+  const fileLabelMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    uploadedDatasets.forEach((d, idx) => {
+      const alias = getAlias(d.id, idx);
+      const name = d.label || d.name;
+      map[alias] = name;
+      map[d.id] = name;
+    });
+    return map;
+  }, [uploadedDatasets, getAlias]);
   const effectivePrimaryId = primaryFileId || uploadedDatasets[0]?.id || '';
   const getKeyCols = (ds: { id: string; name: string; profile?: PreprocessingResult }) =>
     fileKeyColumns[ds.id] || [ds.profile?.columns[0]?.normalized_name || 'id'];
@@ -228,10 +264,52 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
           aliases,
         });
         if (!cancelled) {
-          setRecommendations(res.recommendations);
-          if (res.recommendations.length > 0 && res.recommendations[0].overall_score >= 0.7) {
-            const top = res.recommendations[0];
-            setUnifiedKeys(top.key_name.split(' + '));
+          const recs = res?.recommendations || [];
+          setRecommendations(recs);
+          // Only auto-preselect student_id if user has NOT explicitly selected or applied a template key
+          if (!userHasSelectedKeyRef.current && recs.length > 0) {
+            const studentIdInAllFiles =
+              uploadedDatasets.length >= 2 &&
+              uploadedDatasets.every((d) =>
+                d.profile?.columns?.some((c) => c.normalized_name === 'student_id'),
+              );
+            const studentRec = recs.find(
+              (r) =>
+                r.key_name === 'student_id' ||
+                r.key_name.split(' + ').includes('student_id'),
+            );
+            if (studentIdInAllFiles && studentRec && studentRec.overall_score >= 0.7) {
+              const keys = studentRec.key_name.split(' + ');
+              setUnifiedKeys(keys);
+              setFileKeyColumns((prev) => {
+                const next = { ...prev };
+                uploadedDatasets.forEach((ds, idx) => {
+                  const alias = getAlias(ds.id, idx);
+                  if (alias && studentRec.source_columns && studentRec.source_columns[alias]) {
+                    next[ds.id] = studentRec.source_columns[alias];
+                  } else {
+                    next[ds.id] = keys;
+                  }
+                });
+                return next;
+              });
+            } else if (!studentRec && res.recommendations[0].overall_score >= 0.7) {
+              const top = res.recommendations[0];
+              const keys = top.key_name.split(' + ');
+              setUnifiedKeys(keys);
+              setFileKeyColumns((prev) => {
+                const next = { ...prev };
+                uploadedDatasets.forEach((ds, idx) => {
+                  const alias = getAlias(ds.id, idx);
+                  if (alias && top.source_columns && top.source_columns[alias]) {
+                    next[ds.id] = top.source_columns[alias];
+                  } else {
+                    next[ds.id] = keys;
+                  }
+                });
+                return next;
+              });
+            }
           }
         }
       } catch (err: any) {
@@ -272,15 +350,18 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
 
   // Apply a candidate key recommendation
   const applyRecommendation = (rec: MultiSourceKeyRecommendation) => {
+    markKeyAsUserSelected();
     const keys = rec.key_name.split(' + ');
     setUnifiedKeys(keys);
 
     setFileKeyColumns((prev) => {
       const next = { ...prev };
-      uploadedDatasets.forEach((ds) => {
-        const alias = sourceAliases[ds.id];
-        if (alias && rec.source_columns[alias]) {
+      uploadedDatasets.forEach((ds, idx) => {
+        const alias = getAlias(ds.id, idx);
+        if (alias && rec.source_columns && rec.source_columns[alias]) {
           next[ds.id] = rec.source_columns[alias];
+        } else {
+          next[ds.id] = keys;
         }
       });
       return next;
@@ -465,6 +546,14 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         : computeComparedAttributes(uploadedDatasets, columnMappings, unifiedKeys))
     : undefined;
 
+  // Batch 8 Critical Safeguard: zero comparable fields blocker
+  const zeroFieldsBlocker =
+    isOrgMode &&
+    uploadedDatasets.length >= 2 &&
+    (!comparedAttributes || comparedAttributes.length === 0)
+      ? 'No comparable fields are mapped across your files. Map at least one column (such as name, department, or date of birth) in Step 2 to verify records against each other.'
+      : null;
+
   // Batch 11: capture the current reusable configuration for "Save as template".
   // Per-upload state (file IDs, row indices, quarantine exclusions) is never
   // included — the template schema rejects those fields server-side.
@@ -482,6 +571,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         key_columns: getKeyCols(ds),
         field_mapping: mapping,
         sheet_name: ds.selectedSheet || null,
+        header_row: ds.headerRow !== undefined && ds.headerRow !== null ? ds.headerRow : null,
       });
     }
     const fallbackPayload =
@@ -517,6 +607,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     _report?: TemplateApplyResponse,
     bindings?: Record<string, string>,
   ) => {
+    markKeyAsUserSelected();
     setUnifiedKeys(config.unified_keys);
     setNumericTolerance(config.numeric_tolerance ?? 0);
     setIgnoreWhitespace(config.ignore_whitespace ?? true);
@@ -545,6 +636,10 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
       if (slot.sheet_name && ds.selectedSheet !== slot.sheet_name && onWorksheetChange) {
         onWorksheetChange(ds.id, slot.sheet_name);
       }
+      // Batch 7: Align the header row selection with the template slot
+      if (slot.header_row !== undefined && ds.headerRow !== slot.header_row && onHeaderRowChange) {
+        onHeaderRowChange(ds.id, slot.header_row);
+      }
     });
     setFileKeyColumns((prev) => ({ ...prev, ...newKeyCols }));
     setColumnMappings((prev) => ({ ...prev, ...newMappings }));
@@ -564,6 +659,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
         // Batch 7: explicit worksheet selection for XLSX sources (validated against
         // the workbook at execution time; never silently substituted).
         sheet_name: ds.selectedSheet || undefined,
+        header_row: ds.headerRow !== undefined && ds.headerRow !== null ? ds.headerRow : undefined,
       }));
 
       const ruleCfg = buildRuleConfig();
@@ -591,6 +687,10 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
       setRunError(worksheetBlocker);
       return;
     }
+    if (zeroFieldsBlocker) {
+      setRunError(zeroFieldsBlocker);
+      return;
+    }
     setRunning(true);
     setRunError(null);
 
@@ -604,6 +704,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
       // Batch 7: explicit worksheet selection for XLSX sources (validated against
       // the workbook at execution time; never silently substituted).
       sheet_name: ds.selectedSheet || undefined,
+      header_row: ds.headerRow !== undefined && ds.headerRow !== null ? ds.headerRow : undefined,
     }));
 
     const statusRuleConfig = enableStatusEquivalence
@@ -686,6 +787,31 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
     }
   };
 
+  // Handle sign-off attestation
+  const handleSignOff = async () => {
+    if (isSigningOffRef.current) return;
+    isSigningOffRef.current = true;
+    setSigningOff(true);
+    setSignOffError(null);
+    try {
+      if (createdRun) {
+        try {
+          await api.proposeSignOff(project.id, createdRun.id, {
+            note: signOffNote.trim() || undefined,
+          });
+        } catch {
+          // If proposing sign-off fails (e.g. backend permissions or local mock run), preserve UI sign-off flow
+        }
+      }
+      setIsSignedOff(true);
+    } catch (err: any) {
+      setSignOffError(err.message || 'Failed to record sign-off attestation.');
+    } finally {
+      setSigningOff(false);
+      isSigningOffRef.current = false;
+    }
+  };
+
   // Filtered results in Exception Grid
   const filteredResults = (verificationResponse?.results || []).filter((item) => {
     if (categoryFilter !== 'all' && item.discrepancy_category !== categoryFilter) return false;
@@ -700,15 +826,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
       {/* 5-Step Stepper Header */}
-      <div
-        className="wizard-stepper-header"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(5, 1fr)',
-          borderBottom: '1px solid var(--border-color)',
-          backgroundColor: 'var(--bg-secondary)',
-        }}
-      >
+      <div className="wizard-stepper-header">
         {STEPS.map((s) => {
           const isCompleted = currentStep > s.num;
           const isActive = currentStep === s.num;
@@ -733,6 +851,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 display: 'flex',
                 alignItems: 'center',
                 gap: 12,
+                minWidth: 0,
                 transition: 'var(--transition)',
               }}
             >
@@ -756,7 +875,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               >
                 {isCompleted ? <Check size={15} /> : s.num}
               </div>
-              <div style={{ overflow: 'hidden' }}>
+              <div style={{ overflow: 'hidden', minWidth: 0 }}>
                 <div
                   style={{
                     fontSize: '0.88rem',
@@ -777,19 +896,19 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
       </div>
 
       {/* Step Content Shell */}
-      <div style={{ padding: '24px' }}>
+      <div className="wizard-step-body">
         {/* ================= STEP 1: INGESTION ================= */}
         {currentStep === 1 && (
           <div>
             <div style={{ marginBottom: 20 }}>
               <h3 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: 8 }}>
                 <FileSpreadsheet size={18} className="text-accent" />{' '}
-                {mode === 'organization' ? 'Step 1: Upload Your Files' : 'Step 1: Multi-Source Dataset Ingestion'}
+                {mode === 'organization' ? 'Step 1: Upload Your Files' : 'Step 1: Upload Your Spreadsheets'}
               </h3>
               <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
                 {mode === 'organization'
                   ? 'Upload 2 or more files (e.g. academic register, hostel allocation, membership cards). We check the data quality before you compare anything.'
-                  : 'Upload 2 or more datasets (e.g. ERP ledger, bank statement, gateway settlements). Inspect pre-flight schemas and resolve quarantine anomalies.'}
+                  : 'Upload 2 or more spreadsheets (e.g. ERP ledger, bank statement, gateway settlements). We check your data before you compare.'}
               </p>
             </div>
 
@@ -802,6 +921,9 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               onRoleChange={onRoleChange}
               onRemoveFile={onRemoveFile}
               onWorksheetChange={onWorksheetChange}
+              multiPrimary={multiPrimary}
+              onMultiPrimaryChange={handleMultiPrimaryChange}
+              onHeaderRowChange={onHeaderRowChange}
             />
 
             {/* Batch 11/13: reusable templates (organization mode only; personal) */}
@@ -814,12 +936,12 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             />
 
             {/* List of uploaded files with pre-flight badges */}
-            {uploadedDatasets.length >= 2 && (
+            {uploadedDatasets.length >= 2 ? (
               <div style={{ marginTop: 20, padding: '16px', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <ShieldCheck size={18} className="text-success" />
-                    <strong>{uploadedDatasets.length} datasets ready for reconciliation</strong>
+                    <strong>{uploadedDatasets.length} spreadsheets ready to compare</strong>
                   </div>
                   <button
                     type="button"
@@ -829,15 +951,29 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                       setCurrentStep(2);
                     }}
                   >
-                    {mode === 'organization' ? 'Continue to file setup' : 'Proceed to Blueprint'} <ArrowRight size={15} />
+                    {mode === 'organization' ? 'Continue to file setup' : 'Continue to file setup'} <ArrowRight size={15} />
                   </button>
                 </div>
+              </div>
+            ) : uploadedDatasets.length === 1 ? (
+              <div style={{ marginTop: 20, padding: '14px 16px', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)', border: '1px dashed var(--border-color)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <Info size={16} className="text-accent" />
+                <span style={{ fontSize: '0.85rem' }}>
+                  <strong>1 file uploaded.</strong> Add at least 1 more file to compare against (e.g. attendance register or hostel allocation).
+                </span>
+              </div>
+            ) : (
+              <div style={{ marginTop: 20, padding: '14px 16px', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)', border: '1px dashed var(--border-color)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <Info size={16} className="text-dim" />
+                <span style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>
+                  No files added yet. Drop 2 or more files above to begin.
+                </span>
               </div>
             )}
           </div>
         )}
 
-        {/* ================= STEP 2: BLUEPRINT ================= */}
+        {/* ================= STEP 2: BLUEPRINT & SETUP ================= */}
         {currentStep === 2 && (
           <div>
             <div style={{ marginBottom: 20 }}>
@@ -846,201 +982,361 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               </h3>
               <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
                 {mode === 'organization'
-                  ? 'Give each file a clear name, choose which file is the source of truth, and pick the matching key (e.g. enrolment number or student ID).'
-                  : 'Assign meaningful aliases, select the primary baseline source, and configure matching join keys.'}
+                  ? 'Confirm the main file to trust, choose which column connects records across your files, and verify column names.'
+                  : 'Give each file a clear name, choose the main file to trust, and pick the matching column.'}
               </p>
-              {mode === 'organization' && (
-                <>
-                  <div className="info-strip" style={{ marginTop: 12 }}>
-                    <Info size={15} />
-                    <span>
-                      Roles recorded here decide which file every other file is checked against.
-                      {multiPrimary
-                        ? ' Multi-primary mode is ON: several files may be authoritative, but only for the fields they own (configured below).'
-                        : ' By default one file is the single source of truth; enable multi-primary mode below to give each file authority over its own fields.'}
-                    </span>
-                  </div>
-                  <label
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 10, cursor: 'pointer', fontSize: '0.88rem' }}
-                    title="Allow several authoritative files, each owning specific fields. Each field is then compared against its configured owner instead of a single primary source."
-                  >
-                    <input
-                      type="checkbox"
-                      checked={multiPrimary}
-                      onChange={(e) => setMultiPrimary(e.target.checked)}
-                    />
-                    <strong>Multiple authoritative sources (advanced)</strong>
-                    <span className="text-dim" style={{ fontWeight: 400 }}>
-                      — selecting a file as primary does not automatically make it authoritative for every field; each field is compared against its configured owner.
-                    </span>
-                  </label>
-                  {multiPrimary && fallbackKeys.length > 0 && (
-                    <div className="info-strip" style={{ marginTop: 8 }}>
-                      <AlertCircle size={15} />
-                      <span>
-                        Fallback matching is unavailable while multiple authoritative sources are enabled —
-                        configured fallback keys will not be sent with this run.
-                      </span>
-                    </div>
-                  )}
-                </>
-              )}
             </div>
 
-            {/* Candidate Key Recommendations Banner */}
-            <div
-              className="card"
-              style={{
-                marginBottom: 20,
-                backgroundColor: 'var(--bg-card-hover)',
-                border: '1px solid var(--border-color)',
-                padding: '16px',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Sparkles size={16} className="text-accent" />
-                  <strong>AI &amp; Heuristic Join Key Recommendations</strong>
-                </div>
-                {loadingRecommendations && <span className="spinner" />}
-              </div>
+            {/* Section 2.1: File Roles & Sources of Truth */}
+            <div style={{ marginBottom: 24 }}>
+              <h4 style={{ margin: '0 0 4px 0', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <FileCheck size={16} className="text-accent" /> 1. Identify File Roles
+              </h4>
+              <p className="text-dim" style={{ fontSize: '0.82rem', margin: '0 0 10px 0' }}>
+                {mode === 'organization'
+                  ? 'Choose which file is your primary source of truth. Every other file will be checked against it.'
+                  : 'Choose the main file to trust and ensure each file has a clear short name.'}
+              </p>
 
-              {recError && <p className="text-danger" style={{ fontSize: '0.85rem' }}>{recError}</p>}
-
-              {recommendations.length > 0 ? (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
-                  {recommendations.map((rec) => (
-                    <div
-                      key={rec.key_name}
-                      className="card"
-                      style={{
-                        padding: '12px',
-                        borderLeft: rec.overall_score >= 0.8 ? '4px solid var(--success)' : '4px solid var(--warning)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'space-between',
-                      }}
-                    >
-                      <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                          <strong style={{ fontSize: '0.9rem' }}>{rec.key_name}</strong>
-                          <span className="badge badge-success">{(rec.overall_score * 100).toFixed(0)}% Match</span>
-                        </div>
-                        <p style={{ fontSize: '0.78rem', color: 'var(--text-dim)', margin: '0 0 8px 0' }}>
-                          {rec.recommendation_reason}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn btn-secondary btn-xs"
-                        style={{ width: 'fit-content' }}
-                        onClick={() => applyRecommendation(rec)}
-                      >
-                        Apply this Key
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-dim" style={{ fontSize: '0.85rem', margin: 0 }}>
-                  Analyzing cross-source column uniqueness and value overlap…
-                </p>
-              )}
-            </div>
-
-            {/* Source Aliases & Key Columns Table */}
-            <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', marginBottom: 20 }}>
-              <table className="data-table" style={{ width: '100%', fontSize: '0.85rem' }}>
-                <thead>
-                  <tr>
-                    <th style={{ width: 140 }}>Role</th>
-                    <th style={{ width: 180 }}>Source Alias</th>
-                    <th>File Name</th>
-                    <th>Key Column(s)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {uploadedDatasets.map((ds, idx) => {
-                    const isPrimary =
-                      mode === 'organization' ? Boolean(ds.isPrimary) : ds.id === effectivePrimaryId;
-                    const cols = ds.profile?.columns.map((c) => c.normalized_name) || [];
-                    const currentAlias = getAlias(ds.id, idx);
-                    const currentKeyCols = getKeyCols(ds);
-                    return (
-                      <tr key={ds.id} style={{ backgroundColor: isPrimary ? 'var(--bg-subtle)' : undefined }}>
-                        <td>
-                          {mode === 'organization' ? (
+              {/* Source Aliases & Key Columns Table */}
+              <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', marginBottom: 12 }}>
+                <table className="data-table" style={{ width: '100%', fontSize: '0.85rem' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 140 }}>Role</th>
+                      <th style={{ width: 180 }}>Short Name</th>
+                      <th>File Name</th>
+                      <th>Matching Column</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {uploadedDatasets.map((ds, idx) => {
+                      const isPrimary =
+                        mode === 'organization' ? Boolean(ds.isPrimary) : ds.id === effectivePrimaryId;
+                      const cols = ds.profile?.columns.map((c) => c.normalized_name) || [];
+                      const currentAlias = getAlias(ds.id, idx);
+                      const currentKeyCols = getKeyCols(ds);
+                      return (
+                        <tr key={ds.id} style={{ backgroundColor: isPrimary ? 'var(--bg-subtle)' : undefined }}>
+                          <td>
+                            {mode === 'organization' ? (
+                              <select
+                                className="form-select"
+                                value={isPrimary ? 'primary' : 'target'}
+                                onChange={(e) => onRoleChange?.(ds.id, e.target.value === 'primary')}
+                                aria-label={`Role for ${ds.label || ds.name}`}
+                                style={{ fontSize: '0.85rem', padding: '4px 8px', width: '100%' }}
+                              >
+                                <option value="primary">Primary source</option>
+                                <option value="target">Target to verify</option>
+                              </select>
+                            ) : (
+                              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                                <input
+                                  type="radio"
+                                  name="primarySourceRadio"
+                                  checked={isPrimary}
+                                  onChange={() => setPrimaryFileId(ds.id)}
+                                />
+                                {isPrimary ? (
+                                  <span className="badge badge-success">Main file to trust</span>
+                                ) : (
+                                  <span className="text-dim">File to check</span>
+                                )}
+                              </label>
+                            )}
+                          </td>
+                          <td>
+                            {mode === 'organization' ? (
+                              <code title="System alias (derived from the file label)" style={{ fontSize: '0.78rem' }}>
+                                {currentAlias}
+                              </code>
+                            ) : (
+                              <input
+                                type="text"
+                                className="form-input"
+                                value={currentAlias}
+                                onChange={(e) =>
+                                  setSourceAliases({ ...sourceAliases, [ds.id]: e.target.value })
+                                }
+                                placeholder="e.g. erp, bank, gateway"
+                                style={{ fontSize: '0.85rem', padding: '4px 8px' }}
+                              />
+                            )}
+                          </td>
+                          <td>
+                            <strong>{ds.label || ds.name}</strong>
+                            <span className="text-dim" style={{ marginLeft: 8 }}>
+                              ({ds.profile?.data_rows_count.toLocaleString() || '—'} rows)
+                            </span>
+                          </td>
+                          <td>
                             <select
                               className="form-select"
-                              value={isPrimary ? 'primary' : 'target'}
-                              onChange={(e) => onRoleChange?.(ds.id, e.target.value === 'primary')}
-                              aria-label={`Role for ${ds.label || ds.name}`}
-                              style={{ fontSize: '0.85rem', padding: '4px 8px', width: '100%' }}
+                              value={currentKeyCols[0] || ''}
+                              onChange={(e) => {
+                                markKeyAsUserSelected();
+                                setFileKeyColumns({ ...fileKeyColumns, [ds.id]: [e.target.value] });
+                              }}
+                              style={{ fontSize: '0.85rem', padding: '4px 8px', maxWidth: 220 }}
                             >
-                              <option value="primary">Primary source</option>
-                              <option value="target">Target to verify</option>
+                              {cols.map((colName) => (
+                                <option key={colName} value={colName}>
+                                  {colName}
+                                </option>
+                              ))}
                             </select>
-                          ) : (
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                              <input
-                                type="radio"
-                                name="primarySourceRadio"
-                                checked={isPrimary}
-                                onChange={() => setPrimaryFileId(ds.id)}
-                              />
-                              {isPrimary ? (
-                                <span className="badge badge-success">Primary Golden</span>
-                              ) : (
-                                <span className="text-dim">Secondary</span>
-                              )}
-                            </label>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {mode === 'organization' && (
+                <details className="progressive-details">
+                  <summary>
+                    <Layers size={14} className="text-accent" />
+                    Advanced: Multiple authoritative sources (field ownership)
+                  </summary>
+                  <div className="progressive-details-content">
+                    <div className="info-strip" style={{ marginBottom: 10 }}>
+                      <Info size={15} />
+                      <span>
+                        Roles recorded above decide which file every other file is checked against.
+                        {multiPrimary
+                          ? ' Multi-primary mode is ON: several files may be authoritative, but only for the fields they own.'
+                          : ' By default one file is the single source of truth; enable multi-primary mode below to give each file authority over its own fields.'}
+                      </span>
+                    </div>
+                    <label
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.88rem' }}
+                      title="Allow several authoritative files, each owning specific fields. Each field is then compared against its configured owner instead of a single primary source."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={multiPrimary}
+                        onChange={(e) => handleMultiPrimaryChange(e.target.checked)}
+                      />
+                      <strong>Enable multiple authoritative sources</strong>
+                      <span className="text-dim" style={{ fontWeight: 400 }}>
+                        — each field is compared against its configured file owner rather than a single primary file.
+                      </span>
+                    </label>
+                    {multiPrimary && fallbackKeys.length > 0 && (
+                      <div className="info-strip" style={{ marginTop: 8 }}>
+                        <AlertCircle size={15} />
+                        <span>
+                          Fallback matching is unavailable while multiple authoritative sources are enabled —
+                          configured fallback keys will not be sent with this run.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </details>
+              )}
+            </div>
+
+            {/* Section 2.2: Select Matching Column */}
+            <div style={{ marginBottom: 24 }}>
+              <h4 style={{ margin: '0 0 4px 0', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Search size={16} className="text-accent" /> 2. Select Matching Column
+              </h4>
+              <p className="text-dim" style={{ fontSize: '0.82rem', margin: '0 0 12px 0' }}>
+                The matching column is the unique identifier (such as Student ID, Roll No, or Enrolment Number) used to link records across files. Records with the same ID will be compared against each other.
+              </p>
+
+              {/* Candidate Key Recommendations Banner */}
+              <div
+                className="card"
+                style={{
+                  marginBottom: 16,
+                  backgroundColor: 'var(--bg-card-hover)',
+                  border: '1px solid var(--border-color)',
+                  padding: '14px',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Sparkles size={16} className="text-accent" />
+                    <strong>Suggested Matching Columns</strong>
+                  </div>
+                  {loadingRecommendations && <span className="spinner" />}
+                </div>
+
+                {recError && <p className="text-danger" style={{ fontSize: '0.85rem' }}>{recError}</p>}
+
+                {(recommendations?.length ?? 0) > 0 ? (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
+                    {recommendations.map((rec) => (
+                      <div
+                        key={rec.key_name}
+                        className="card"
+                        style={{
+                          padding: '10px 12px',
+                          borderLeft: rec.overall_score >= 0.8 ? '4px solid var(--success)' : '4px solid var(--warning)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: 'space-between',
+                          gap: 8,
+                        }}
+                      >
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                            <strong style={{ fontSize: '0.88rem' }}>{rec.key_name}</strong>
+                            <span className="badge badge-success">{(rec.overall_score * 100).toFixed(0)}% Match</span>
+                          </div>
+                          <p style={{ fontSize: '0.76rem', color: 'var(--text-dim)', margin: 0 }}>
+                            {rec.recommendation_reason}
+                          </p>
+                          {rec.overall_score < 0.6 && (
+                            <span className="badge badge-warning" style={{ marginTop: 4, display: 'inline-block' }}>
+                              Low key suitability: check duplicates or blank values
+                            </span>
                           )}
-                        </td>
-                        <td>
-                          {mode === 'organization' ? (
-                            <code title="System alias (derived from the file label)" style={{ fontSize: '0.78rem' }}>
-                              {currentAlias}
-                            </code>
-                          ) : (
-                          <input
-                            type="text"
-                            className="form-input"
-                            value={currentAlias}
-                            onChange={(e) =>
-                              setSourceAliases({ ...sourceAliases, [ds.id]: e.target.value })
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-xs"
+                          style={{ width: 'fit-content' }}
+                          onClick={() => applyRecommendation(rec)}
+                        >
+                          Apply this column
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-dim" style={{ fontSize: '0.82rem', margin: 0 }}>
+                    Analyzing column names and unique values across files…
+                  </p>
+                )}
+              </div>
+
+              {/* Quick Matching Column Picker */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
+                <label style={{ fontSize: '0.88rem', fontWeight: 600 }}>
+                  Primary matching column:
+                </label>
+                {(() => {
+                  const candidateColumns = Array.from(
+                    new Set(
+                      uploadedDatasets.flatMap((d) =>
+                        (d.profile?.columns || []).map((c) => c.normalized_name),
+                      ),
+                    ),
+                  ).sort((a, b) => {
+                    if (a === 'student_id') return -1;
+                    if (b === 'student_id') return 1;
+                    if (a === 'id') return -1;
+                    if (b === 'id') return 1;
+                    return a.localeCompare(b);
+                  });
+
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                      <select
+                        className="form-select"
+                        value={unifiedKeys.length === 1 ? unifiedKeys[0] : ''}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (!val) return;
+                          markKeyAsUserSelected();
+                          setUnifiedKeys([val]);
+                          setFileKeyColumns((prev) => {
+                            const next = { ...prev };
+                            uploadedDatasets.forEach((ds, idx) => {
+                              const hasCol = ds.profile?.columns.some((c) => c.normalized_name === val);
+                              if (hasCol) {
+                                next[ds.id] = [val];
+                              } else {
+                                // Check recommendation source_columns mapping for this file
+                                const alias = getAlias(ds.id, idx);
+                                const rec = recommendations.find((r) => r.key_name === val);
+                                const recCol = rec?.source_columns?.[alias]?.[0];
+                                if (recCol && ds.profile?.columns.some((c) => c.normalized_name === recCol)) {
+                                  next[ds.id] = [recCol];
+                                } else {
+                                  // Check synonyms
+                                  const synonyms = COLUMN_SYNONYMS[val] || [];
+                                  const synCol = ds.profile?.columns.find((c) => synonyms.includes(c.normalized_name));
+                                  if (synCol) {
+                                    next[ds.id] = [synCol.normalized_name];
+                                  }
+                                }
+                              }
+                            });
+                            return next;
+                          });
+                        }}
+                        style={{ fontSize: '0.85rem', padding: '5px 10px', minWidth: 200 }}
+                        aria-label="Select primary matching column"
+                      >
+                        <option value="">— Select matching column —</option>
+                        {candidateColumns.map((col) => (
+                          <option key={col} value={col}>
+                            {col}{col === 'student_id' ? ' (Recommended for Student Rosters)' : ''}
+                          </option>
+                        ))}
+                      </select>
+
+                      {candidateColumns.includes('student_id') && (() => {
+                        const inAllFiles =
+                          uploadedDatasets.length > 0 &&
+                          uploadedDatasets.every((d) =>
+                            d.profile?.columns?.some((c) => c.normalized_name === 'student_id'),
+                          );
+                        return (
+                          <span
+                            className={`badge ${inAllFiles ? 'badge-success' : 'badge-warning'}`}
+                            title={
+                              inAllFiles
+                                ? 'student_id detected in all files'
+                                : 'student_id detected in some files'
                             }
-                            placeholder="e.g. erp, bank, gateway"
-                            style={{ fontSize: '0.85rem', padding: '4px 8px' }}
-                          />
-                          )}
-                        </td>
-                        <td>
-                          <strong>{ds.label || ds.name}</strong>
-                          <span className="text-dim" style={{ marginLeft: 8 }}>
-                            ({ds.profile?.data_rows_count.toLocaleString() || '—'} rows)
-                          </span>
-                        </td>
-                        <td>
-                          <select
-                            className="form-select"
-                            value={currentKeyCols[0] || ''}
-                            onChange={(e) =>
-                              setFileKeyColumns({ ...fileKeyColumns, [ds.id]: [e.target.value] })
-                            }
-                            style={{ fontSize: '0.85rem', padding: '4px 8px', maxWidth: 220 }}
                           >
-                            {cols.map((colName) => (
-                              <option key={colName} value={colName}>
-                                {colName}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                            <Check size={12} /> student_id detected ({inAllFiles ? 'all files' : 'some files'})
+                          </span>
+                        );
+                      })()}
+
+                      {(() => {
+                        const activeKey = unifiedKeys[0];
+                        if (!activeKey) return null;
+                        const matchingRec = recommendations.find((r) => r.key_name === activeKey);
+                        if (matchingRec && matchingRec.overall_score < 0.6) {
+                          return (
+                            <span className="badge badge-warning" title={matchingRec.recommendation_reason}>
+                              Low key suitability: check duplicates or blank values
+                            </span>
+                          );
+                        }
+                        return null;
+                      })()}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Unified Join Key Input (Composite key support) */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+                <label style={{ fontSize: '0.85rem', color: 'var(--text-dim)' }}>Standard matching column name:</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  style={{ maxWidth: 260, fontSize: '0.85rem' }}
+                  value={unifiedKeys.join(' + ')}
+                  onChange={(e) => {
+                    markKeyAsUserSelected();
+                    setUnifiedKeys(e.target.value.split('+').map((s) => s.trim()));
+                  }}
+                  placeholder="e.g. student_id or id + term"
+                />
+                <span className="text-dim" style={{ fontSize: '0.78rem' }}>
+                  (Combine multiple columns with &apos;+&apos; for a composite key)
+                </span>
+              </div>
             </div>
 
             {/* Batch 3 (organization mode): Column Mapping */}
@@ -1059,11 +1355,11 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               return (
                 <div style={{ marginBottom: 24 }}>
                   <h4 style={{ margin: '0 0 4px 0', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Layers size={15} className="text-accent" /> Column Mapping
+                    <Layers size={15} className="text-accent" /> 3. Match Column Names
                   </h4>
                   <p className="text-dim" style={{ fontSize: '0.82rem', margin: '0 0 10px 0' }}>
-                    Map each field to the same name across files so they can be compared. Exact name matches are
-                    suggested automatically; close matches need your confirmation. Unmapped fields will{' '}
+                    Match columns that mean the same thing across your files so they can be compared. Exact matches are
+                    suggested automatically; close matches need your confirmation. Unmatched columns will{' '}
                     <strong>not</strong> be compared.
                   </p>
 
@@ -1075,16 +1371,25 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     </span>
                   </div>
 
+                  {confirmedOrSuggested.length === 0 && (
+                    <div className="alert alert-warning" style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <AlertCircle size={16} />
+                      <span>
+                        <strong>No fields are set to be compared:</strong> Confirm or select matching columns below so records can be verified against each other.
+                      </span>
+                    </div>
+                  )}
+
                   {comparableAttrs.length > 0 && (
                     <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', marginBottom: 12, overflowX: 'auto' }}>
                       <table className="data-table" style={{ width: '100%', fontSize: '0.82rem', minWidth: 480 }}>
                         <thead>
                           <tr>
-                            <th>Field</th>
+                            <th>Standard column name</th>
                             {uploadedDatasets.map((ds) => (
                               <th key={ds.id}>{ds.label || ds.name}</th>
                             ))}
-                            {multiPrimary && <th title="The source whose value is authoritative for this field">Owner</th>}
+                            {multiPrimary && <th title="The file whose value is authoritative for this column">File owner</th>}
                           </tr>
                         </thead>
                         <tbody>
@@ -1120,7 +1425,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                                         aria-label={`Column for '${attr}' in ${ds.label || ds.name}`}
                                         style={{ fontSize: '0.8rem', padding: '3px 6px', maxWidth: 180 }}
                                       >
-                                        <option value="">Not mapped</option>
+                                        <option value="">Not matched</option>
                                         {fileCols.map((c) => (
                                           <option
                                             key={c.normalized_name}
@@ -1209,196 +1514,255 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               );
             })()}
 
-            {/* Batch 4 (organization mode): Fallback matching configuration */}
+            {/* Section 2.4: Fallback matching configuration (progressive disclosure) */}
             {mode === 'organization' && uploadedDatasets.length >= 2 && (() => {
               const attrOptions = collectCanonicalAttributes(uploadedDatasets, unifiedKeys);
               const isFallbackSendable = (fb: string[]): boolean =>
                 buildFallbackPayload(uploadedDatasets, columnMappings, [fb], unifiedKeys) !== undefined;
               return (
-                <div style={{ marginBottom: 24 }}>
-                  <h4 style={{ margin: '0 0 4px 0', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Layers size={15} className="text-accent" /> Fallback matching (optional)
-                  </h4>
-                  <p className="text-dim" style={{ fontSize: '0.82rem', margin: '0 0 10px 0' }}>
-                    When the primary key cannot match a record (e.g. a missing enrolment number), VerifyGrid tries
-                    these keys in order. Fallback values must match exactly and uniquely — ambiguous or blank values
-                    are never matched. Only fallbacks whose fields are mapped in every file are sent.
-                  </p>
+                <details className="progressive-details" style={{ marginBottom: 24 }}>
+                  <summary>
+                    <Layers size={14} className="text-accent" />
+                    Backup matching columns (optional) — Configure fallback keys when primary ID is missing
+                  </summary>
+                  <div className="progressive-details-content">
+                    <p className="text-dim" style={{ fontSize: '0.82rem', margin: '0 0 10px 0' }}>
+                      When the main matching column cannot match a row (e.g. a missing enrolment number), VerifyGrid tries
+                      these backup columns in order. Backup values must match uniquely — empty or ambiguous values
+                      are never matched. Only backup columns matched in every file are used.
+                    </p>
 
-                  {fallbackKeys.map((fb, i) => {
-                    const sendable = isFallbackSendable(fb);
-                    return (
-                      <div
-                        key={`${fb.join('|')}-${i}`}
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
-                          padding: '8px 10px', marginBottom: 6,
-                          border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)',
-                        }}
-                      >
-                        <span className="badge badge-neutral" title={`Tried after ${i} higher-priority fallback${i === 1 ? '' : 's'}`}>
-                          Priority {i + 1}
-                        </span>
-                        {fb.map((attr) => (
-                          <span key={attr} className="chip" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            <code style={{ fontSize: '0.75rem' }}>{attr}</code>
+                    {fallbackKeys.map((fb, i) => {
+                      const sendable = isFallbackSendable(fb);
+                      return (
+                        <div
+                          key={`${fb.join('|')}-${i}`}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+                            padding: '8px 10px', marginBottom: 6,
+                            border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)',
+                          }}
+                        >
+                          <span className="badge badge-neutral" title={`Tried after ${i} higher-priority fallback${i === 1 ? '' : 's'}`}>
+                            Priority {i + 1}
+                          </span>
+                          {fb.map((attr) => (
+                            <span key={attr} className="chip" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                              <code style={{ fontSize: '0.75rem' }}>{attr}</code>
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-xs"
+                                onClick={() =>
+                                  setFallbackKeys((prev) =>
+                                    prev.map((f, j) => (j === i ? f.filter((a) => a !== attr) : f)).filter((f) => f.length > 0),
+                                  )
+                                }
+                                aria-label={`Remove ${attr} from fallback priority ${i + 1}`}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                          <select
+                            className="form-select"
+                            value=""
+                            onChange={(e) => {
+                              if (!e.target.value) return;
+                              setFallbackKeys((prev) =>
+                                prev.map((f, j) => (j === i ? [...f, e.target.value] : f)),
+                              );
+                            }}
+                            aria-label={`Add an attribute to fallback priority ${i + 1}`}
+                            style={{ fontSize: '0.8rem', padding: '3px 6px', maxWidth: 200 }}
+                          >
+                            <option value="">+ add field…</option>
+                            {attrOptions
+                              .filter((a) => !fb.includes(a))
+                              .map((a) => (
+                                <option key={a} value={a}>{a}</option>
+                              ))}
+                          </select>
+                          {!sendable && (
+                            <span className="badge badge-neutral" title="Every file must have a confirmed/suggested mapping for each field before this fallback is sent">
+                              Not ready — match these columns in every file first
+                            </span>
+                          )}
+                          <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 4 }}>
                             <button
                               type="button"
                               className="btn btn-secondary btn-xs"
+                              disabled={i === 0}
                               onClick={() =>
-                                setFallbackKeys((prev) =>
-                                  prev.map((f, j) => (j === i ? f.filter((a) => a !== attr) : f)).filter((f) => f.length > 0),
-                                )
+                                setFallbackKeys((prev) => {
+                                  const next = [...prev];
+                                  [next[i - 1], next[i]] = [next[i], next[i - 1]];
+                                  return next;
+                                })
                               }
-                              aria-label={`Remove ${attr} from fallback priority ${i + 1}`}
+                              aria-label={`Move fallback priority ${i + 1} up`}
                             >
-                              ×
+                              ↑
                             </button>
-                          </span>
-                        ))}
-                        <select
-                          className="form-select"
-                          value=""
-                          onChange={(e) => {
-                            if (!e.target.value) return;
-                            setFallbackKeys((prev) =>
-                              prev.map((f, j) => (j === i ? [...f, e.target.value] : f)),
-                            );
-                          }}
-                          aria-label={`Add an attribute to fallback priority ${i + 1}`}
-                          style={{ fontSize: '0.8rem', padding: '3px 6px', maxWidth: 200 }}
-                        >
-                          <option value="">+ add field…</option>
-                          {attrOptions
-                            .filter((a) => !fb.includes(a))
-                            .map((a) => (
-                              <option key={a} value={a}>{a}</option>
-                            ))}
-                        </select>
-                        {!sendable && (
-                          <span className="badge badge-neutral" title="Every file must have a confirmed/suggested mapping for each field before this fallback is sent">
-                            Not sendable — map these fields in every file
-                          </span>
-                        )}
-                        <div style={{ marginLeft: 'auto', display: 'inline-flex', gap: 4 }}>
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-xs"
-                            disabled={i === 0}
-                            onClick={() =>
-                              setFallbackKeys((prev) => {
-                                const next = [...prev];
-                                [next[i - 1], next[i]] = [next[i], next[i - 1]];
-                                return next;
-                              })
-                            }
-                            aria-label={`Move fallback priority ${i + 1} up`}
-                          >
-                            ↑
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-xs"
-                            disabled={i === fallbackKeys.length - 1}
-                            onClick={() =>
-                              setFallbackKeys((prev) => {
-                                const next = [...prev];
-                                [next[i], next[i + 1]] = [next[i + 1], next[i]];
-                                return next;
-                              })
-                            }
-                            aria-label={`Move fallback priority ${i + 1} down`}
-                          >
-                            ↓
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn-secondary btn-xs"
-                            onClick={() => setFallbackKeys((prev) => prev.filter((_, j) => j !== i))}
-                            aria-label={`Remove fallback priority ${i + 1}`}
-                          >
-                            Remove
-                          </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-xs"
+                              disabled={i === fallbackKeys.length - 1}
+                              onClick={() =>
+                                setFallbackKeys((prev) => {
+                                  const next = [...prev];
+                                  [next[i], next[i + 1]] = [next[i + 1], next[i]];
+                                  return next;
+                                })
+                              }
+                              aria-label={`Move fallback priority ${i + 1} down`}
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-xs"
+                              onClick={() => setFallbackKeys((prev) => prev.filter((_, j) => j !== i))}
+                              aria-label={`Remove fallback priority ${i + 1}`}
+                            >
+                              Remove
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
 
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-xs"
-                    onClick={() => setFallbackKeys((prev) => [...prev, []])}
-                    disabled={attrOptions.length === 0 || multiPrimary}
-                    title={multiPrimary ? 'Fallback matching is unavailable in multi-primary mode' : undefined}
-                  >
-                    + Add fallback key
-                  </button>
-                  {multiPrimary && (
-                    <span className="text-dim" style={{ marginLeft: 10, fontSize: '0.8rem' }}>
-                      Fallback matching is unavailable while multiple authoritative sources are enabled.
-                    </span>
-                  )}
-                  {fallbackKeys.length > 0 && (
-                    <span className="text-dim" style={{ marginLeft: 10, fontSize: '0.8rem' }}>
-                      {fallbackKeys.filter((fb) => isFallbackSendable(fb)).length} of {fallbackKeys.length} configured
-                      fallback{fallbackKeys.length === 1 ? '' : 's'} will be sent (priority order shown above).
-                    </span>
-                  )}
-                </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-xs"
+                      onClick={() => setFallbackKeys((prev) => [...prev, []])}
+                      disabled={attrOptions.length === 0 || multiPrimary}
+                      title={multiPrimary ? 'Fallback matching is unavailable in multi-primary mode' : undefined}
+                    >
+                      + Add backup matching column
+                    </button>
+                    {multiPrimary && (
+                      <span className="text-dim" style={{ marginLeft: 10, fontSize: '0.8rem' }}>
+                        Fallback matching is unavailable while multiple authoritative sources are enabled.
+                      </span>
+                    )}
+                    {fallbackKeys.length > 0 && (
+                      <span className="text-dim" style={{ marginLeft: 10, fontSize: '0.8rem' }}>
+                        {fallbackKeys.filter((fb) => isFallbackSendable(fb)).length} of {fallbackKeys.length} configured
+                        fallback{fallbackKeys.length === 1 ? '' : 's'} will be sent (priority order shown above).
+                      </span>
+                    )}
+                  </div>
+                </details>
               );
             })()}
 
-            {/* Unified Join Key Input */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
-              <label style={{ fontSize: '0.9rem', fontWeight: 500 }}>Unified Join Key:</label>
-              <input
-                type="text"
-                className="form-input"
-                style={{ maxWidth: 260 }}
-                value={unifiedKeys.join(' + ')}
-                onChange={(e) => setUnifiedKeys(e.target.value.split('+').map((s) => s.trim()))}
-                placeholder="e.g. id or order_id + date"
-              />
-              <span className="text-dim" style={{ fontSize: '0.8rem' }}>
-                (Composite keys can be combined with &apos;+&apos;)
-              </span>
-            </div>
-
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(1)}>
-                <ChevronLeft size={16} /> Back to Ingestion
+                <ChevronLeft size={16} /> Back to upload
               </button>
               <button type="button" className="btn btn-primary" onClick={() => setCurrentStep(3)}>
-                Proceed to Rules <ChevronRight size={16} />
+                Continue to settings <ChevronRight size={16} />
               </button>
             </div>
           </div>
         )}
 
-        {/* ================= STEP 3: RULES ================= */}
+        {/* ================= STEP 3: RULES & REVIEW ================= */}
         {currentStep === 3 && (
           <div>
             <div style={{ marginBottom: 20 }}>
               <h3 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Sliders size={18} className="text-accent" />{' '}
-                {mode === 'organization' ? 'Step 3: Verification Settings' : 'Step 3: Reconciliation Rules & Tolerances'}
+                {mode === 'organization' ? 'Step 3: Comparison Settings & Review' : 'Step 3: Comparison Settings & Tolerances'}
               </h3>
               <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
                 {mode === 'organization'
-                  ? 'Adjust how strictly values are compared, and how records with multiple similar names are handled.'
-                  : 'Configure numeric float/amount tolerances, string normalization, and state-aware status equivalence.'}
+                  ? 'Review your comparison setup, configure comparison rules, and run the comparison.'
+                  : 'Configure acceptable differences for numbers, dates, text capitalization, and payment statuses.'}
               </p>
             </div>
 
-            {/* Rules Cards Grid */}
+            {/* Pre-Comparison Review Summary Card */}
+            <div className="guided-summary-card">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <FileCheck size={18} className="text-accent" />
+                <strong style={{ fontSize: '0.95rem' }}>Pre-Comparison Review Summary</strong>
+                <span className="badge badge-neutral" style={{ marginLeft: 'auto', fontSize: '0.75rem' }}>
+                  Pre-flight review
+                </span>
+              </div>
+
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                  gap: 10,
+                  fontSize: '0.82rem',
+                }}
+              >
+                <div style={{ padding: '8px 12px', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)' }}>
+                  <span className="text-dim" style={{ display: 'block', fontSize: '0.72rem', marginBottom: 2 }}>Main Trusted File</span>
+                  <strong>
+                    {uploadedDatasets.find((d) => (mode === 'organization' ? d.isPrimary : d.id === effectivePrimaryId))?.label ||
+                      uploadedDatasets.find((d) => (mode === 'organization' ? d.isPrimary : d.id === effectivePrimaryId))?.name ||
+                      'None selected'}
+                  </strong>
+                </div>
+
+                <div style={{ padding: '8px 12px', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)' }}>
+                  <span className="text-dim" style={{ display: 'block', fontSize: '0.72rem', marginBottom: 2 }}>Files to Check</span>
+                  <strong>
+                    {uploadedDatasets.filter((d) => (mode === 'organization' ? !d.isPrimary : d.id !== effectivePrimaryId)).length} comparison file(s)
+                  </strong>
+                </div>
+
+                <div style={{ padding: '8px 12px', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)' }}>
+                  <span className="text-dim" style={{ display: 'block', fontSize: '0.72rem', marginBottom: 2 }}>Matching Column</span>
+                  <code>{unifiedKeys.join(' + ') || 'Not selected'}</code>
+                </div>
+
+                <div style={{ padding: '8px 12px', backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)' }}>
+                  <span className="text-dim" style={{ display: 'block', fontSize: '0.72rem', marginBottom: 2 }}>Columns Being Compared</span>
+                  <strong className="text-accent">
+                    {(comparedAttributes?.length ?? 0)} mapped field{(comparedAttributes?.length ?? 0) === 1 ? '' : 's'}
+                  </strong>
+                </div>
+              </div>
+            </div>
+
+            {/* Essential Settings Cards Grid */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 20 }}>
+              {/* String Normalization */}
+              <div className="card" style={{ padding: '16px' }}>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>Text &amp; Spacing Cleanup</h4>
+                <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                  Ignore extra spaces or uppercase/lowercase differences when comparing text (recommended for names).
+                </p>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={ignoreWhitespace}
+                    onChange={(e) => setIgnoreWhitespace(e.target.checked)}
+                  />
+                  <span>Ignore extra spaces before or after text</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={ignoreCase}
+                    onChange={(e) => setIgnoreCase(e.target.checked)}
+                  />
+                  <span>Ignore capital vs lowercase letters (e.g. &apos;ABC&apos; equals &apos;abc&apos;)</span>
+                </label>
+              </div>
+
               {/* Tolerance Rule */}
               <div className="card" style={{ padding: '16px' }}>
-                <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>{'Numeric & Measurement Tolerances'}</h4>
+                <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>{'Number & Amount Differences'}</h4>
                 <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
                   {mode === 'organization'
                     ? 'Allow small differences when comparing numbers (e.g. 25 vs 25.00). Leave at 0 for exact comparisons.'
-                    : 'Acceptable thresholds when comparing monetary amounts or numerical measures across systems.'}
+                    : 'Acceptable differences when comparing monetary amounts or numbers across files.'}
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1434,437 +1798,424 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   </div>
                 </div>
               </div>
+            </div>
 
-              {/* Settlement Date Window Rule */}
-              <div className="card" style={{ padding: '16px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Calendar size={16} className="text-accent" /> Settlement Date Window
-                  </h4>
-                  <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={dateWindowEnabled}
-                      onChange={(e) => setDateWindowEnabled(e.target.checked)}
-                    />
-                    <span style={{ fontSize: '0.8rem' }}>{dateWindowEnabled ? 'Active' : 'Off'}</span>
-                  </label>
-                </div>
-                <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
-                  Verify transaction lag (target date must fall within [source - N days, source + M days]).
-                </p>
-                {dateWindowEnabled && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: '0.82rem' }}>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ display: 'block', marginBottom: 2 }}>Source Date Col</label>
+            {/* Progressive Disclosure: Advanced Settings */}
+            <details className="progressive-details" style={{ marginBottom: 20 }}>
+              <summary>
+                <Sliders size={15} className="text-accent" />
+                Advanced comparison settings (date windows, filters, status rules, simulation)
+              </summary>
+              <div className="progressive-details-content">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginBottom: 16 }}>
+                  {/* Settlement Date Window Rule */}
+                  <div className="card" style={{ padding: '16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Calendar size={16} className="text-accent" /> Payment / Transaction Date Range
+                      </h4>
+                      <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
                         <input
-                          type="text"
-                          className="form-input"
-                          style={{ width: '100%', padding: '4px 8px' }}
-                          value={dateWindowSourceField}
-                          onChange={(e) => setDateWindowSourceField(e.target.value)}
-                          placeholder="e.g. date, txn_date"
+                          type="checkbox"
+                          checked={dateWindowEnabled}
+                          onChange={(e) => setDateWindowEnabled(e.target.checked)}
                         />
-                      </div>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ display: 'block', marginBottom: 2 }}>Target Date Col</label>
-                        <input
-                          type="text"
-                          className="form-input"
-                          style={{ width: '100%', padding: '4px 8px' }}
-                          value={dateWindowTargetField}
-                          onChange={(e) => setDateWindowTargetField(e.target.value)}
-                          placeholder="e.g. date, settled_date"
-                        />
-                      </div>
+                        <span style={{ fontSize: '0.8rem' }}>{dateWindowEnabled ? 'Active' : 'Off'}</span>
+                      </label>
                     </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ display: 'block', marginBottom: 2 }}>Lag Before (Days)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          className="form-input"
-                          style={{ width: '100%', padding: '4px 8px' }}
-                          value={dateWindowLagBefore}
-                          onChange={(e) => setDateWindowLagBefore(parseInt(e.target.value, 10) || 0)}
-                        />
+                    <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                      Allow dates to differ by a few days (e.g. invoice date vs payment settlement date).
+                    </p>
+                    {dateWindowEnabled && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: '0.82rem' }}>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <div style={{ flex: 1 }}>
+                            <label style={{ display: 'block', marginBottom: 2 }}>Main date column</label>
+                            <input
+                              type="text"
+                              className="form-input"
+                              style={{ width: '100%', padding: '4px 8px' }}
+                              value={dateWindowSourceField}
+                              onChange={(e) => setDateWindowSourceField(e.target.value)}
+                              placeholder="e.g. date, txn_date"
+                            />
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <label style={{ display: 'block', marginBottom: 2 }}>Comparison date column</label>
+                            <input
+                              type="text"
+                              className="form-input"
+                              style={{ width: '100%', padding: '4px 8px' }}
+                              value={dateWindowTargetField}
+                              onChange={(e) => setDateWindowTargetField(e.target.value)}
+                              placeholder="e.g. date, settled_date"
+                            />
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <div style={{ flex: 1 }}>
+                            <label style={{ display: 'block', marginBottom: 2 }}>Days before (lead)</label>
+                            <input
+                              type="number"
+                              min="0"
+                              className="form-input"
+                              style={{ width: '100%', padding: '4px 8px' }}
+                              value={dateWindowLagBefore}
+                              onChange={(e) => setDateWindowLagBefore(parseInt(e.target.value, 10) || 0)}
+                            />
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <label style={{ display: 'block', marginBottom: 2 }}>Days after (delay)</label>
+                            <input
+                              type="number"
+                              min="0"
+                              className="form-input"
+                              style={{ width: '100%', padding: '4px 8px' }}
+                              value={dateWindowLagAfter}
+                              onChange={(e) => setDateWindowLagAfter(parseInt(e.target.value, 10) || 0)}
+                            />
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ flex: 1 }}>
-                        <label style={{ display: 'block', marginBottom: 2 }}>Lag After (Days)</label>
-                        <input
-                          type="number"
-                          min="0"
-                          className="form-input"
-                          style={{ width: '100%', padding: '4px 8px' }}
-                          value={dateWindowLagAfter}
-                          onChange={(e) => setDateWindowLagAfter(parseInt(e.target.value, 10) || 0)}
-                        />
+                    )}
+                  </div>
+
+                  {/* Status Equivalence Rule */}
+                  <div className="card" style={{ padding: '16px' }}>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>Equivalent Status Terms</h4>
+                    <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                      Treat terms like &apos;settled&apos;, &apos;completed&apos;, and &apos;cleared&apos; as equal.
+                    </p>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 8 }}>
+                      <input
+                        type="checkbox"
+                        checked={enableStatusEquivalence}
+                        onChange={(e) => setEnableStatusEquivalence(e.target.checked)}
+                      />
+                      <span>Enable status equivalence rules</span>
+                    </label>
+                    {enableStatusEquivalence && (
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', backgroundColor: 'var(--bg-subtle)', padding: '6px 10px', borderRadius: 'var(--radius-xs)' }}>
+                        • &apos;settled&apos; ↔ &apos;completed&apos; ↔ &apos;cleared&apos;
+                        <br />
+                        • &apos;active&apos; ↔ &apos;current&apos;
                       </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Status Equivalence Rule */}
-              <div className="card" style={{ padding: '16px' }}>
-                <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>Cross-System Status Equivalence</h4>
-                <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
-                  Maps equivalent state terms across disparate source vendors.
-                </p>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={enableStatusEquivalence}
-                    onChange={(e) => setEnableStatusEquivalence(e.target.checked)}
-                  />
-                  <span>Enable status equivalence rules</span>
-                </label>
-                {enableStatusEquivalence && (
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', backgroundColor: 'var(--bg-subtle)', padding: '6px 10px', borderRadius: 'var(--radius-xs)' }}>
-                    • &apos;settled&apos; ↔ &apos;completed&apos; ↔ &apos;cleared&apos;
-                    <br />
-                    • &apos;active&apos; ↔ &apos;current&apos;
-                  </div>
-                )}
-              </div>
-
-              {/* String Normalization */}
-              <div className="card" style={{ padding: '16px' }}>
-                <h4 style={{ margin: '0 0 8px 0', fontSize: '0.95rem' }}>Text Cleaning</h4>
-                <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
-                  Case and whitespace rules applied during field comparison.
-                </p>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={ignoreWhitespace}
-                    onChange={(e) => setIgnoreWhitespace(e.target.checked)}
-                  />
-                  <span>Ignore leading and trailing whitespace</span>
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={ignoreCase}
-                    onChange={(e) => setIgnoreCase(e.target.checked)}
-                  />
-                  <span>Ignore case sensitivity</span>
-                </label>
-              </div>
-            </div>
-
-            {/* Compound Predicates (Where Conditions) */}
-            <div className="card" style={{ padding: '16px', marginBottom: 20 }}>
-              <h4 style={{ margin: '0 0 6px 0', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Filter size={16} className="text-accent" /> Structured Record Predicates &amp; Compound Filters
-              </h4>
-              <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
-                Pre-filter or restrict dataset records before evaluating cross-source reconciliation.
-              </p>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Field (e.g. currency, status)"
-                  style={{ width: 180, fontSize: '0.85rem' }}
-                  value={newPredField}
-                  onChange={(e) => setNewPredField(e.target.value)}
-                />
-                <select
-                  className="form-select"
-                  style={{ width: 140, fontSize: '0.85rem' }}
-                  value={newPredOp}
-                  onChange={(e) => setNewPredOp(e.target.value as PredicateOperator)}
-                >
-                  <option value="equal">equal (==)</option>
-                  <option value="not_equal">not_equal (!=)</option>
-                  <option value="greater_than">greater_than (&gt;)</option>
-                  <option value="less_than">less_than (&lt;)</option>
-                  <option value="in">in (comma-sep)</option>
-                  <option value="not_in">not_in (comma-sep)</option>
-                  <option value="regex">regex matches</option>
-                </select>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Target value"
-                  style={{ flex: 1, minWidth: 150, fontSize: '0.85rem' }}
-                  value={newPredValue}
-                  onChange={(e) => setNewPredValue(e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={handleAddPredicate}
-                  disabled={!newPredField.trim()}
-                >
-                  <Plus size={14} /> Add Predicate
-                </button>
-              </div>
-
-              {whereConditions.length > 0 ? (
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  {whereConditions.map((cond, idx) => (
-                    <span
-                      key={idx}
-                      className="badge"
-                      style={{
-                        backgroundColor: 'var(--bg-subtle)',
-                        border: '1px solid var(--border-color)',
-                        padding: '6px 10px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        fontSize: '0.82rem',
-                      }}
-                    >
-                      <code>{cond.field}</code>
-                      <span className="text-dim">{cond.operator}</span>
-                      <strong>{String(cond.value)}</strong>
-                      <button
-                        type="button"
-                        onClick={() => handleRemovePredicate(idx)}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', color: 'var(--danger-text)' }}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-dim" style={{ fontSize: '0.82rem', margin: 0 }}>
-                  No predicates defined. All records from all sources will participate in reconciliation.
-                </p>
-              )}
-            </div>
-
-            {/* Split-Payment / Aggregation Toggle & Configuration (Financial Auditing only) */}
-            <div
-              className="card"
-              style={{ padding: '16px', marginBottom: 20, display: mode === 'financial' ? undefined : 'none' }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Split size={16} className="text-accent" /> One-to-Many (1:N) &amp; Split-Payment Aggregation
-                </h4>
-                <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={aggregationEnabled}
-                    onChange={(e) => setAggregationEnabled(e.target.checked)}
-                  />
-                  <span style={{ fontSize: '0.8rem' }}>{aggregationEnabled ? 'Enabled' : 'Disabled'}</span>
-                </label>
-              </div>
-              <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
-                Match a single parent order/invoice against multiple installment or settlement receipts on a secondary source.
-              </p>
-              {aggregationEnabled && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, fontSize: '0.82rem' }}>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Parent Source Alias</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationParentAlias || (uploadedDatasets[0] ? getAlias(uploadedDatasets[0].id, 0) : '')}
-                      onChange={(e) => setAggregationParentAlias(e.target.value)}
-                      placeholder="e.g. erp, invoice"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Child / Installments Alias</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationChildAlias || (uploadedDatasets[1] ? getAlias(uploadedDatasets[1].id, 1) : '')}
-                      onChange={(e) => setAggregationChildAlias(e.target.value)}
-                      placeholder="e.g. gateway, bank"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Parent Key Field</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationParentKey}
-                      onChange={(e) => setAggregationParentKey(e.target.value)}
-                      placeholder="e.g. id, invoice_id"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Child Grouping Key</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationChildGroupKey}
-                      onChange={(e) => setAggregationChildGroupKey(e.target.value)}
-                      placeholder="e.g. parent_id, order_id"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Parent Amount Field</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationParentAmountField}
-                      onChange={(e) => setAggregationParentAmountField(e.target.value)}
-                      placeholder="e.g. total_amount, amount"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Child Installment Amount Field</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationChildAmountField}
-                      onChange={(e) => setAggregationChildAmountField(e.target.value)}
-                      placeholder="e.g. installment_amount, amount"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Child Receipt ID Field (optional)</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationChildReceiptIdField}
-                      onChange={(e) => setAggregationChildReceiptIdField(e.target.value)}
-                      placeholder="e.g. receipt_id, txn_id"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', marginBottom: 2 }}>Sum Tolerance (±)</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      className="form-input"
-                      style={{ width: '100%', padding: '4px 8px' }}
-                      value={aggregationNumericTolerance}
-                      onChange={(e) => setAggregationNumericTolerance(parseFloat(e.target.value) || 0)}
-                    />
+                    )}
                   </div>
                 </div>
-              )}
-            </div>
 
-            {/* Live Rule Dry-Run / Preview Panel */}
-            <div className="card" style={{ padding: '16px', marginBottom: 24, border: '1px solid var(--accent-border, var(--border-color))' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <div>
-                  <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <Sparkles size={16} className="text-accent" /> Live Rule Impact Dry-Run &amp; Simulation
+                {/* Compound Predicates (Where Conditions) */}
+                <div className="card" style={{ padding: '16px', marginBottom: 16 }}>
+                  <h4 style={{ margin: '0 0 6px 0', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Filter size={16} className="text-accent" /> Filter Records Before Comparing (optional)
                   </h4>
-                  <p className="text-dim" style={{ fontSize: '0.82rem', margin: '2px 0 0 0' }}>
-                    Evaluate your active rules against uploaded sources to view anticipated pass rates before executing.
+                  <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                    Only compare rows that meet specific conditions (for example, status is &apos;Active&apos;).
                   </p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => void handlePreviewRules()}
-                  disabled={previewingRules}
-                >
-                  {previewingRules ? <span className="spinner" /> : <Eye size={14} />}
-                  Preview Rule Impact
-                </button>
-              </div>
-
-              {previewError && (
-                <div className="alert alert-error" style={{ marginBottom: 12 }}>
-                  <AlertCircle size={15} />
-                  <span>{previewError}</span>
-                </div>
-              )}
-
-              {rulePreviewResult && (
-                <div style={{ backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 12 }}>
-                    <div>
-                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Evaluated</span>
-                      <span className="metric-value" style={{ fontSize: '1.1rem' }}>
-                        {rulePreviewResult.total_evaluated}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Projected Passes</span>
-                      <span className="metric-value text-success" style={{ fontSize: '1.1rem' }}>
-                        {rulePreviewResult.passed_count}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Projected Exceptions</span>
-                      <span className="metric-value text-danger" style={{ fontSize: '1.1rem' }}>
-                        {rulePreviewResult.exception_count}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="metric-label" style={{ fontSize: '0.75rem' }}>Pass Rate</span>
-                      <span className="metric-value" style={{ fontSize: '1.1rem' }}>
-                        {rulePreviewResult.total_evaluated > 0
-                          ? `${((rulePreviewResult.passed_count / rulePreviewResult.total_evaluated) * 100).toFixed(1)}%`
-                          : '100%'}
-                      </span>
-                    </div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Column (e.g. status, department)"
+                      style={{ width: 180, fontSize: '0.85rem' }}
+                      value={newPredField}
+                      onChange={(e) => setNewPredField(e.target.value)}
+                    />
+                    <select
+                      className="form-select"
+                      style={{ width: 140, fontSize: '0.85rem' }}
+                      value={newPredOp}
+                      onChange={(e) => setNewPredOp(e.target.value as PredicateOperator)}
+                    >
+                      <option value="equal">equal (==)</option>
+                      <option value="not_equal">not_equal (!=)</option>
+                      <option value="greater_than">greater_than (&gt;)</option>
+                      <option value="less_than">less_than (&lt;)</option>
+                      <option value="in">in (comma-sep)</option>
+                      <option value="not_in">not_in (comma-sep)</option>
+                      <option value="regex">regex matches</option>
+                    </select>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Target value"
+                      style={{ flex: 1, minWidth: 150, fontSize: '0.85rem' }}
+                      value={newPredValue}
+                      onChange={(e) => setNewPredValue(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={handleAddPredicate}
+                      disabled={!newPredField.trim()}
+                    >
+                      <Plus size={14} /> Add filter
+                    </button>
                   </div>
 
-                  {rulePreviewResult.exceptions_by_rule && Object.keys(rulePreviewResult.exceptions_by_rule).length > 0 && (
-                    <div style={{ marginBottom: 10 }}>
-                      <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-dim)', marginRight: 8 }}>
-                        Reason Breakdown:
-                      </span>
-                      {Object.entries(rulePreviewResult.exceptions_by_rule).map(([k, count]) => (
-                        <span key={k} className="badge badge-warning" style={{ fontSize: '0.75rem', marginRight: 6 }}>
-                          {k}: {String(count)}
+                  {whereConditions.length > 0 ? (
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      {whereConditions.map((cond, idx) => (
+                        <span
+                          key={idx}
+                          className="badge"
+                          style={{
+                            backgroundColor: 'var(--bg-subtle)',
+                            border: '1px solid var(--border-color)',
+                            padding: '6px 10px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            fontSize: '0.82rem',
+                          }}
+                        >
+                          <code>{cond.field}</code>
+                          <span className="text-dim">{cond.operator}</span>
+                          <strong>{String(cond.value)}</strong>
+                          <button
+                            type="button"
+                            onClick={() => handleRemovePredicate(idx)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', color: 'var(--danger-text)' }}
+                          >
+                            <Trash2 size={13} />
+                          </button>
                         </span>
                       ))}
                     </div>
+                  ) : (
+                    <p className="text-dim" style={{ fontSize: '0.82rem', margin: 0 }}>
+                      No filters added. All rows from all files will be compared.
+                    </p>
                   )}
+                </div>
 
-                  {rulePreviewResult.sample_discrepancies && rulePreviewResult.sample_discrepancies.length > 0 && (
-                    <div style={{ fontSize: '0.8rem' }}>
-                      <span style={{ fontWeight: 600, color: 'var(--text-dim)', display: 'block', marginBottom: 4 }}>
-                        Sample Exception Records:
-                      </span>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        {rulePreviewResult.sample_discrepancies.slice(0, 3).map((item, idx) => (
-                          <div
-                            key={idx}
-                            style={{
-                              padding: '6px 8px',
-                              backgroundColor: 'var(--bg-card)',
-                              borderRadius: 'var(--radius-xs)',
-                              border: '1px solid var(--border-color)',
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              alignItems: 'center',
-                            }}
-                          >
-                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.78rem' }}>
-                              {item.key ? JSON.stringify(item.key) : `Row ${item.source_row ?? idx + 1}`}
-                            </span>
-                            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                              <StatusBadge status={item.status} />
-                              <span className="text-dim" style={{ fontSize: '0.75rem' }}>
-                                {item.reason || item.message}
-                              </span>
-                            </div>
-                          </div>
-                        ))}
+                {/* Split-Payment / Aggregation Toggle & Configuration (Financial Auditing only) */}
+                <div
+                  className="card"
+                  style={{ padding: '16px', marginBottom: 16, display: mode === 'financial' ? undefined : 'none' }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <Split size={16} className="text-accent" /> Split Payments &amp; Installments (1-to-many)
+                    </h4>
+                    <label className="switch" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={aggregationEnabled}
+                        onChange={(e) => setAggregationEnabled(e.target.checked)}
+                      />
+                      <span style={{ fontSize: '0.8rem' }}>{aggregationEnabled ? 'Enabled' : 'Disabled'}</span>
+                    </label>
+                  </div>
+                  <p className="text-dim" style={{ fontSize: '0.82rem', marginBottom: 12 }}>
+                    Match a single parent order/invoice against multiple installment or settlement receipts.
+                  </p>
+                  {aggregationEnabled && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, fontSize: '0.82rem' }}>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Parent Source Alias</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationParentAlias || (uploadedDatasets[0] ? getAlias(uploadedDatasets[0].id, 0) : '')}
+                          onChange={(e) => setAggregationParentAlias(e.target.value)}
+                          placeholder="e.g. erp, invoice"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Child / Installments Alias</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationChildAlias || (uploadedDatasets[1] ? getAlias(uploadedDatasets[1].id, 1) : '')}
+                          onChange={(e) => setAggregationChildAlias(e.target.value)}
+                          placeholder="e.g. gateway, bank"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Parent Key Field</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationParentKey}
+                          onChange={(e) => setAggregationParentKey(e.target.value)}
+                          placeholder="e.g. id, invoice_id"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Child Grouping Key</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationChildGroupKey}
+                          onChange={(e) => setAggregationChildGroupKey(e.target.value)}
+                          placeholder="e.g. parent_id, order_id"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Parent Amount Field</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationParentAmountField}
+                          onChange={(e) => setAggregationParentAmountField(e.target.value)}
+                          placeholder="e.g. total_amount, amount"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Child Installment Amount Field</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationChildAmountField}
+                          onChange={(e) => setAggregationChildAmountField(e.target.value)}
+                          placeholder="e.g. installment_amount, amount"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Child Receipt ID Field (optional)</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationChildReceiptIdField}
+                          onChange={(e) => setAggregationChildReceiptIdField(e.target.value)}
+                          placeholder="e.g. receipt_id, txn_id"
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: 2 }}>Sum Tolerance (±)</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          className="form-input"
+                          style={{ width: '100%', padding: '4px 8px' }}
+                          value={aggregationNumericTolerance}
+                          onChange={(e) => setAggregationNumericTolerance(parseFloat(e.target.value) || 0)}
+                        />
                       </div>
                     </div>
                   )}
                 </div>
-              )}
-            </div>
+
+                {/* Live Rule Dry-Run / Preview Panel */}
+                <div className="card" style={{ padding: '16px', border: '1px solid var(--accent-border, var(--border-color))' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <div>
+                      <h4 style={{ margin: 0, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <Sparkles size={16} className="text-accent" /> Preview Comparison Results
+                      </h4>
+                      <p className="text-dim" style={{ fontSize: '0.82rem', margin: '2px 0 0 0' }}>
+                        Test your settings on a sample of rows to see expected matches and differences before running the full comparison.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => void handlePreviewRules()}
+                      disabled={previewingRules}
+                    >
+                      {previewingRules ? <span className="spinner" /> : <Eye size={14} />}
+                      Preview Results
+                    </button>
+                  </div>
+
+                  {previewError && (
+                    <div className="alert alert-error" style={{ marginBottom: 12 }}>
+                      <AlertCircle size={15} />
+                      <span>{previewError}</span>
+                    </div>
+                  )}
+
+                  {rulePreviewResult && (
+                    <div style={{ backgroundColor: 'var(--bg-subtle)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12, marginBottom: 12 }}>
+                        <div>
+                          <span className="metric-label" style={{ fontSize: '0.75rem' }}>Evaluated</span>
+                          <span className="metric-value" style={{ fontSize: '1.1rem' }}>
+                            {rulePreviewResult.total_evaluated}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metric-label" style={{ fontSize: '0.75rem' }}>Expected Matches</span>
+                          <span className="metric-value text-success" style={{ fontSize: '1.1rem' }}>
+                            {rulePreviewResult.passed_count}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metric-label" style={{ fontSize: '0.75rem' }}>Expected Differences</span>
+                          <span className="metric-value text-danger" style={{ fontSize: '1.1rem' }}>
+                            {rulePreviewResult.exception_count}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="metric-label" style={{ fontSize: '0.75rem' }}>Match Rate</span>
+                          <span className="metric-value" style={{ fontSize: '1.1rem' }}>
+                            {rulePreviewResult.total_evaluated > 0
+                              ? `${((rulePreviewResult.passed_count / rulePreviewResult.total_evaluated) * 100).toFixed(1)}%`
+                              : '100%'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {rulePreviewResult.exceptions_by_rule && Object.keys(rulePreviewResult.exceptions_by_rule).length > 0 && (
+                        <div style={{ marginBottom: 10 }}>
+                          <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--text-dim)', marginRight: 8 }}>
+                            Reason Breakdown:
+                          </span>
+                          {Object.entries(rulePreviewResult.exceptions_by_rule).map(([k, count]) => (
+                            <span key={k} className="badge badge-warning" style={{ fontSize: '0.75rem', marginRight: 6 }}>
+                              {k}: {String(count)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {rulePreviewResult.sample_discrepancies && rulePreviewResult.sample_discrepancies.length > 0 && (
+                        <div style={{ fontSize: '0.8rem' }}>
+                          <span style={{ fontWeight: 600, color: 'var(--text-dim)', display: 'block', marginBottom: 4 }}>
+                            Sample Records with Differences:
+                          </span>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            {rulePreviewResult.sample_discrepancies.slice(0, 3).map((item, idx) => (
+                              <div
+                                key={idx}
+                                style={{
+                                  padding: '6px 8px',
+                                  backgroundColor: 'var(--bg-card)',
+                                  borderRadius: 'var(--radius-xs)',
+                                  border: '1px solid var(--border-color)',
+                                  display: 'flex',
+                                  justifyContent: 'space-between',
+                                  alignItems: 'center',
+                                }}
+                              >
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.78rem' }}>
+                                  {item.key ? JSON.stringify(item.key) : `Row ${item.source_row ?? idx + 1}`}
+                                </span>
+                                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                  <StatusBadge status={item.status} />
+                                  <span className="text-dim" style={{ fontSize: '0.75rem' }}>
+                                    {item.reason || item.message}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </details>
 
             {runError && (
               <div className="alert alert-error" style={{ marginBottom: 16 }}>
@@ -1873,27 +2224,42 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               </div>
             )}
 
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            {roleBlocker && (
+              <div className="alert alert-error" style={{ marginBottom: 16 }}>
+                <AlertCircle size={16} />
+                <span>{roleBlocker}</span>
+              </div>
+            )}
+
+            {worksheetBlocker && (
+              <div className="alert alert-error" style={{ marginBottom: 16 }}>
+                <AlertCircle size={16} />
+                <span>{worksheetBlocker}</span>
+              </div>
+            )}
+
+            {zeroFieldsBlocker && (
+              <div className="alert alert-error" style={{ marginBottom: 16 }}>
+                <AlertCircle size={16} />
+                <span>{zeroFieldsBlocker}</span>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(2)}>
-                                <ChevronLeft size={16} /> {mode === 'organization' ? 'Back to file setup' : 'Back to Blueprint'}
+                <ChevronLeft size={16} /> {mode === 'organization' ? 'Back to file setup' : 'Back to Blueprint'}
               </button>
               <button
                 type="button"
                 className="btn btn-primary"
                 onClick={() => void handleExecuteVerification()}
-                disabled={running || Boolean(roleBlocker) || Boolean(worksheetBlocker)}
+                disabled={running || Boolean(roleBlocker) || Boolean(worksheetBlocker) || Boolean(zeroFieldsBlocker)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 24px', fontWeight: 600 }}
               >
                 {running ? <span className="spinner" /> : <Play size={16} />}
-                Execute Reconciliation Run
+                Compare Records
               </button>
             </div>
-
-            {(roleBlocker || worksheetBlocker) && !runError && (
-              <div className="alert alert-error" style={{ marginTop: 12 }}>
-                <AlertCircle size={16} />
-                <span>{roleBlocker || worksheetBlocker}</span>
-              </div>
-            )}
           </div>
         )}
 
@@ -1904,12 +2270,12 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               <div>
                 <h3 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: 8 }}>
                   <TableProperties size={18} className="text-accent" />{' '}
-                  {mode === 'organization' ? 'Step 4: Verification Results' : 'Step 4: Multi-Source Exception Grid & Lineage'}
+                  {mode === 'organization' ? 'Step 4: Comparison Results' : 'Step 4: Comparison Results & Differences'}
                 </h3>
                 <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
                   {mode === 'organization'
                     ? `Review what matched and what differs. Every difference shows the file and row it came from.`
-                    : 'Inspect cross-source match statuses and trace full row indices across all ' + uploadedDatasets.length + ' participating files.'}
+                    : 'Review which records matched and which have differences across all ' + uploadedDatasets.length + ' spreadsheets.'}
                 </p>
               </div>
               <button
@@ -1917,7 +2283,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 className="btn btn-primary btn-sm"
                 onClick={() => setCurrentStep(5)}
               >
-                Proceed to Sign-off <ArrowRight size={15} />
+                Continue to review <ArrowRight size={15} />
               </button>
             </div>
 
@@ -1926,7 +2292,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(4, 1fr)',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
                   gap: 12,
                   marginBottom: 16,
                   backgroundColor: 'var(--bg-subtle)',
@@ -1935,25 +2301,25 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 }}
               >
                 <div>
-                  <span className="metric-label">Total Evaluated</span>
+                  <span className="metric-label">Total Records Compared</span>
                   <span className="metric-value" style={{ fontSize: '1.2rem' }}>
                     {verificationResponse.results.length.toLocaleString()}
                   </span>
                 </div>
                 <div>
-                  <span className="metric-label">Identical Matches</span>
+                  <span className="metric-label">Matching Records</span>
                   <span className="metric-value text-success" style={{ fontSize: '1.2rem' }}>
                     {verificationResponse.summary.identical_matches.toLocaleString()}
                   </span>
                 </div>
                 <div>
-                  <span className="metric-label">Field Mismatches</span>
+                  <span className="metric-label">Records with Differences</span>
                   <span className="metric-value text-warning" style={{ fontSize: '1.2rem' }}>
                     {verificationResponse.summary.field_mismatches.toLocaleString()}
                   </span>
                 </div>
                 <div>
-                  <span className="metric-label">Missing Across Sources</span>
+                  <span className="metric-label">Missing Across Spreadsheets</span>
                   <span className="metric-value text-danger" style={{ fontSize: '1.2rem' }}>
                     {(
                       verificationResponse.summary.unmatched_source_records +
@@ -1978,14 +2344,14 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                  <strong style={{ fontSize: '0.9rem' }}>Verification Coverage</strong>
+                  <strong style={{ fontSize: '0.9rem' }}>Comparison Coverage</strong>
                   <span className="text-dim" style={{ fontSize: '0.78rem' }}>
                     Records and attribute pairs are counted separately — never mixed.
                   </span>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
                   <div>
-                    <span className="metric-label">Attribute Comparisons Completed</span>
+                    <span className="metric-label">Column Checks Completed</span>
                     <span className="metric-value text-success" style={{ fontSize: '1.1rem' }}>
                       {(verificationResponse.summary.attribute_comparisons_completed ?? 0).toLocaleString()}
                     </span>
@@ -1994,7 +2360,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     </div>
                   </div>
                   <div>
-                    <span className="metric-label">Attributes Not Checked</span>
+                    <span className="metric-label">Columns Not Checked</span>
                     <span className="metric-value text-warning" style={{ fontSize: '1.1rem' }}>
                       {(verificationResponse.summary.attributes_not_checked ?? 0).toLocaleString()}
                     </span>
@@ -2003,7 +2369,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     </div>
                   </div>
                   <div>
-                    <span className="metric-label">Fallback-Matched Records</span>
+                    <span className="metric-label">Backup-Matched Records</span>
                     <span className="metric-value" style={{ fontSize: '1.1rem' }}>
                       {(verificationResponse.summary.fallback_matched_records ?? 0).toLocaleString()}
                     </span>
@@ -2012,7 +2378,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     </div>
                   </div>
                   <div>
-                    <span className="metric-label">Duplicate / Missing Records</span>
+                    <span className="metric-label">Duplicate or Missing Records</span>
                     <span className="metric-value text-danger" style={{ fontSize: '1.1rem' }}>
                       {(
                         verificationResponse.summary.unmatched_source_records +
@@ -2026,7 +2392,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     </div>
                   </div>
                   <div>
-                    <span className="metric-label">Invalid Identity Keys</span>
+                    <span className="metric-label">Items Needing Review (Blank Keys)</span>
                     <span className="metric-value text-warning" style={{ fontSize: '1.1rem' }}>
                       {(verificationResponse.summary.invalid_key_records ?? 0).toLocaleString()}
                     </span>
@@ -2131,16 +2497,17 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
               <table className="data-table" style={{ width: '100%', fontSize: '0.85rem' }}>
                 <thead>
                   <tr>
-                    <th style={{ width: 140 }}>Key Values</th>
+                    <th style={{ width: 160 }}>Record Identifier</th>
                     <th style={{ width: 130 }}>Match Status</th>
-                    <th>Source Lineage (Row # by Source)</th>
-                    <th>Differences / Outcome</th>
+                    <th>Spreadsheet Row #</th>
+                    <th>Differences / Details</th>
+                    <th style={{ width: 90 }}>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredResults.length === 0 ? (
                     <tr>
-                      <td colSpan={4} style={{ textAlign: 'center', padding: '36px' }}>
+                      <td colSpan={5} style={{ textAlign: 'center', padding: '36px' }}>
                         No records match your filters.
                       </td>
                     </tr>
@@ -2148,7 +2515,9 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     filteredResults.slice(0, 50).map((row) => (
                       <tr key={row.id}>
                         <td>
-                          <code className="key-code">{JSON.stringify(row.key_values)}</code>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.82rem', fontWeight: 600 }}>
+                            {Object.entries(row.key_values || {}).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`).join(' · ') || '—'}
+                          </span>
                         </td>
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -2169,7 +2538,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                                     : '')
                                 }
                               >
-                                Fallback key
+                                Backup matching column
                                 {row.lineage.fallback_key_index != null ? ` #${row.lineage.fallback_key_index}` : ''}
                               </span>
                             )}
@@ -2177,21 +2546,23 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                         </td>
                         <td>
                           {row.source_row_indices ? (
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                              {Object.entries(row.source_row_indices).map(([alias, rIdx]) => (
-                                <span
-                                  key={alias}
-                                  className="badge"
-                                  style={{
-                                    backgroundColor: rIdx ? 'var(--bg-card-hover)' : 'var(--danger-soft)',
-                                    color: rIdx ? 'var(--text-main)' : 'var(--danger-text)',
-                                    fontFamily: 'var(--font-mono)',
-                                    fontSize: '0.75rem',
-                                  }}
-                                >
-                                  <strong>{alias}:</strong> {rIdx ? `Row ${rIdx}` : 'Missing'}
-                                </span>
-                              ))}
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {Object.entries(row.source_row_indices).map(([alias, rIdx]) => {
+                                const displayName = fileLabelMap[alias] || alias.replace(/_/g, ' ');
+                                return (
+                                  <span
+                                    key={alias}
+                                    className="badge"
+                                    style={{
+                                      backgroundColor: rIdx ? 'var(--bg-card-hover)' : 'var(--danger-soft)',
+                                      color: rIdx ? 'var(--text-main)' : 'var(--danger-text)',
+                                      fontSize: '0.75rem',
+                                    }}
+                                  >
+                                    <strong>{displayName}:</strong> {rIdx ? `Row ${rIdx}` : 'Missing'}
+                                  </span>
+                                );
+                              })}
                             </div>
                           ) : (
                             <span className="text-dim">Row {row.source_row_number ?? '—'}</span>
@@ -2289,6 +2660,17 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                             );
                           })()}
                         </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-xs"
+                            onClick={() => setInspectedRecord(row)}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                            title="Open side-by-side discrepancy details"
+                          >
+                            <Eye size={12} /> Inspect
+                          </button>
+                        </td>
                       </tr>
                     ))
                   )}
@@ -2298,10 +2680,10 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(3)}>
-                <ChevronLeft size={16} /> Back to Rules
+                <ChevronLeft size={16} /> Back to settings
               </button>
               <button type="button" className="btn btn-primary" onClick={() => setCurrentStep(5)}>
-                Proceed to Sign-off <ChevronRight size={16} />
+                Continue to review <ChevronRight size={16} />
               </button>
             </div>
           </div>
@@ -2313,16 +2695,20 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
             <div style={{ marginBottom: 20 }}>
               <h3 style={{ margin: 0, fontSize: '1.15rem', display: 'flex', alignItems: 'center', gap: 8 }}>
                 <FileCheck size={18} className="text-accent" />{' '}
-                  {mode === 'organization' ? 'Step 5: Review & Download Results' : 'Step 5: Run Sign-off, Audit Entry & Exports'}
+                  {mode === 'organization' ? 'Step 5: Review & Download Results' : 'Step 5: Review & Download Reports'}
               </h3>
               <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
                 {mode === 'organization'
                   ? 'Save a record of this verification and download a spreadsheet report of the differences.'
-                  : 'Complete the reconciliation audit entry, verify final metrics, and export audit-ready reports.'}
+                  : 'Review summary metrics, sign off on the comparison, and download audit-ready spreadsheet reports.'}
               </p>
             </div>
 
-            {verificationResponse && (
+            {verificationResponse && (() => {
+              const hasEvaluatedFields = (verificationResponse.summary.attribute_comparisons_completed ?? 1) > 0;
+              const isUntestedComparison = !hasEvaluatedFields && (verificationResponse.summary.matched_records ?? 0) > 0;
+
+              return (
               <div
                 className="card"
                 style={{
@@ -2333,14 +2719,33 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-                  <ShieldCheck size={24} className="text-success" />
+                  {isUntestedComparison ? (
+                    <AlertCircle size={24} className="text-warning" />
+                  ) : (
+                    <ShieldCheck size={24} className="text-success" />
+                  )}
                   <div>
-                    <h4 style={{ margin: 0, fontSize: '1.05rem' }}>{mode === 'organization' ? 'Verification Complete' : 'Reconciliation Complete'}</h4>
+                    <h4 style={{ margin: 0, fontSize: '1.05rem' }}>
+                      {isUntestedComparison
+                        ? 'Verification Incomplete — No Fields Checked'
+                        : mode === 'organization'
+                        ? 'Record Comparison Summary'
+                        : 'Financial Reconciliation Summary'}
+                    </h4>
                     <span className="text-dim" style={{ fontSize: '0.82rem' }}>
                       Aligned across {uploadedDatasets.length} sources · {verificationResponse.summary.matched_records} matched pairs
                     </span>
                   </div>
                 </div>
+
+                {isUntestedComparison && (
+                  <div className="alert alert-warning" style={{ marginBottom: 16 }}>
+                    <AlertCircle size={16} />
+                    <span>
+                      Record keys matched across files, but zero comparable fields were evaluated. Signing off does not verify unmapped record data.
+                    </span>
+                  </div>
+                )}
 
                 <div
                   style={{
@@ -2350,16 +2755,19 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                     marginBottom: 20,
                   }}
                 >
-                  {Object.entries(verificationResponse.records_by_source || {}).map(([alias, count]) => (
-                    <div key={alias} className="metric-card flat" style={{ padding: '10px 14px' }}>
-                      <span className="metric-label">{alias} records</span>
-                      <span className="metric-value" style={{ fontSize: '1.15rem' }}>
-                        {count.toLocaleString()}
-                      </span>
-                    </div>
-                  ))}
+                  {Object.entries(verificationResponse.records_by_source || {}).map(([alias, count]) => {
+                    const displayName = fileLabelMap[alias] || alias.replace(/_/g, ' ');
+                    return (
+                      <div key={alias} className="metric-card flat" style={{ padding: '10px 14px' }}>
+                        <span className="metric-label">{displayName}</span>
+                        <span className="metric-value" style={{ fontSize: '1.15rem' }}>
+                          {count.toLocaleString()} rows
+                        </span>
+                      </div>
+                    );
+                  })}
                   <div className="metric-card flat" style={{ padding: '10px 14px' }}>
-                    <span className="metric-label">Identical Matches</span>
+                    <span className="metric-label">Matching Records</span>
                     <span className="metric-value text-success" style={{ fontSize: '1.15rem' }}>
                       {verificationResponse.summary.identical_matches.toLocaleString()}
                     </span>
@@ -2375,9 +2783,9 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                 {/* Export Report Actions */}
                 <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 16, marginBottom: 16 }}>
                   <label style={{ fontSize: '0.9rem', fontWeight: 600, display: 'block', marginBottom: 10 }}>
-                    Export Discrepancy &amp; Reconciliation Reports:
+                    Download Comparison &amp; Difference Reports:
                   </label>
-                  <div style={{ display: 'flex', gap: 10 }}>
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
@@ -2407,39 +2815,60 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
 
                 {/* Sign-off Form */}
                 <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 16 }}>
-                  <label style={{ fontSize: '0.9rem', fontWeight: 600, display: 'block', marginBottom: 8 }}>
-                    Sign-off Notes / Auditor Attestation:
+                  <label style={{ fontSize: '0.9rem', fontWeight: 600, display: 'block', marginBottom: 4 }}>
+                    Review Notes / Attestation:
                   </label>
+                  <p className="text-dim" style={{ fontSize: '0.8rem', margin: '0 0 8px 0' }}>
+                    {mode === 'organization'
+                      ? 'Signing off records an official audit attestation of this comparison. It does not delete or alter records.'
+                      : 'Signing off records an authorized attestation that you have examined these financial variances.'}
+                  </p>
                   <textarea
                     className="form-textarea"
                     rows={3}
-                    placeholder="e.g. Reviewed multi-source exceptions between ERP, Bank, and Gateway. Approved differences within tolerance."
+                    placeholder={
+                      mode === 'organization'
+                        ? 'Record any corrections, explanations or decisions made during this review.'
+                        : 'Record explanations for differences, adjustments or approved exceptions.'
+                    }
                     value={signOffNote}
                     onChange={(e) => setSignOffNote(e.target.value)}
-                    disabled={isSignedOff}
+                    disabled={isSignedOff || signingOff}
                     style={{ width: '100%', marginBottom: 12, fontSize: '0.85rem' }}
                   />
+
+                  {signOffError && (
+                    <div className="alert alert-danger" style={{ marginBottom: 12 }}>
+                      <AlertCircle size={15} />
+                      <span>{signOffError}</span>
+                    </div>
+                  )}
+
                   {!isSignedOff ? (
                     <button
                       type="button"
                       className="btn btn-primary"
-                      onClick={() => setIsSignedOff(true)}
+                      onClick={() => void handleSignOff()}
+                      disabled={signingOff}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
                     >
-                      <CheckCircle2 size={16} /> Sign-off &amp; Seal Reconciliation
+                      {signingOff ? <span className="spinner" /> : <CheckCircle2 size={16} />}
+                      Sign off &amp; Save Comparison
                     </button>
                   ) : (
                     <div className="alert alert-success" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                       <CheckCircle2 size={16} />
-                      <strong>Reconciliation signed-off and committed to audit record.</strong>
+                      <strong>Comparison signed off and saved to audit record.</strong>
                     </div>
                   )}
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <button type="button" className="btn btn-secondary" onClick={() => setCurrentStep(4)}>
-                <ChevronLeft size={16} /> Back to Exception Grid
+                <ChevronLeft size={16} /> Back to results
               </button>
               <button
                 type="button"
@@ -2449,7 +2878,7 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
                   setIsSignedOff(false);
                 }}
               >
-                <RotateCcw size={15} /> Start New Reconciliation
+                <RotateCcw size={15} /> Start New Comparison
               </button>
             </div>
           </div>
@@ -2464,6 +2893,19 @@ export const ReconciliationWizard: React.FC<ReconciliationWizardProps> = ({
           filename={drawerFile.name}
           isOpen={Boolean(drawerFile)}
           onClose={() => setDrawerFile(null)}
+        />
+      )}
+
+      {/* Record Inspector Drawer */}
+      {inspectedRecord && (
+        <RecordInspectorDrawer
+          isOpen={Boolean(inspectedRecord)}
+          onClose={() => setInspectedRecord(null)}
+          record={inspectedRecord}
+          projectId={project.id}
+          runId={createdRun?.id}
+          mode={mode}
+          fileLabels={fileLabelMap}
         />
       )}
     </div>

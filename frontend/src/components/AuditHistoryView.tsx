@@ -201,8 +201,7 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
         <div>
           <h1 className="page-title">Audit history</h1>
           <p className="page-subtitle">
-            Persistent verification runs for <strong>{project.name}</strong> — inspect outcomes,
-            review discrepancies, and re-export reports.
+            Past comparison runs for <strong>{project.name}</strong> — view results, review differences, and download reports.
           </p>
         </div>
         <div className="row" style={{ gap: 10 }}>
@@ -241,7 +240,7 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
       <div className="card">
         <div className="section-head">
           <h3 className="section-title">
-            <History size={17} /> Verification runs
+            <History size={17} /> Comparison runs
           </h3>
           <span className="text-xs text-dim">
             {runs.length.toLocaleString()} of {total.toLocaleString()} run
@@ -260,10 +259,9 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
             <div className="empty-icon">
               <Inbox size={22} />
             </div>
-            <h3 className="empty-title">No audit runs yet</h3>
+            <h3 className="empty-title">No past comparison runs yet</h3>
             <p className="empty-text">
-              Execute a reconciliation with “Save persistent audit run” enabled and it will appear
-              here with exportable results.
+              Run a comparison and it will be saved here so you can review results or download reports at any time.
             </p>
           </div>
         ) : (
@@ -275,9 +273,9 @@ export const AuditHistoryView: React.FC<AuditHistoryViewProps> = ({ project }) =
                   <th>Created</th>
                   <th>Status</th>
                   <th>Sign-off</th>
-                  <th>Key columns</th>
+                  <th>Matching columns</th>
                   <th>Records compared</th>
-                  <th>Discrepancies</th>
+                  <th>Differences</th>
                   <th aria-label="Actions" />
                 </tr>
               </thead>

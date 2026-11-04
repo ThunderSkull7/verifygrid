@@ -29,3 +29,11 @@ def root():
         "docs": "/docs",
         "version": "0.1.0",
     }
+
+
+@app.get("/health", tags=["Root"])
+def health():
+    return {
+        "status": "healthy",
+        "service": "VerifyGrid API",
+    }

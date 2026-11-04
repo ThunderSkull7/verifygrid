@@ -17,7 +17,7 @@ import { ProfilingQuarantineDrawer } from './ProfilingQuarantineDrawer';
 
 interface FileUploadSectionProps {
   project: Project;
-  onFileUploaded: (file: SourceFile, profile?: PreprocessingResult) => void;
+  onFileUploaded: (file: SourceFile, profile?: PreprocessingResult, contentHash?: string) => void;
   datasets: UploadedDataset[];
   mode?: VerificationMode;
   /** Batch 2: editable labels / explicit roles (organization mode). */
@@ -26,6 +26,11 @@ interface FileUploadSectionProps {
   onRemoveFile?: (fileId: string) => void;
   /** Batch 7: explicit XLSX worksheet selection per file (null = deselect). */
   onWorksheetChange?: (fileId: string, sheet: string | null) => void;
+  /** Batch 7: Single vs Multiple authoritative sources setup. */
+  multiPrimary?: boolean;
+  onMultiPrimaryChange?: (enabled: boolean) => void;
+  /** Batch 7: explicit header row selection per file. */
+  onHeaderRowChange?: (fileId: string, headerRow: number | null) => void;
 }
 
 type UploadPhase = 'idle' | 'uploading' | 'profiling' | 'done';
@@ -44,6 +49,9 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
   onRoleChange,
   onRemoveFile,
   onWorksheetChange,
+  multiPrimary = false,
+  onMultiPrimaryChange,
+  onHeaderRowChange,
 }) => {
   const isOrganization = mode === 'organization';
   const [phase, setPhase] = useState<UploadPhase>('idle');
@@ -60,7 +68,37 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
 
   const busy = phase === 'uploading' || phase === 'profiling';
 
-  const uploadAndProfileOne = async (file: File) => {
+  const handleSetPrimary = (targetId: string) => {
+    if (!multiPrimary) {
+      // Single-source mode: exactly one primary source
+      datasets.forEach((d) => {
+        if (d.id === targetId) {
+          onRoleChange?.(d.id, true);
+        } else if (d.isPrimary) {
+          onRoleChange?.(d.id, false);
+        }
+      });
+    } else {
+      // Multiple-source mode: toggle independently
+      onRoleChange?.(targetId, true);
+    }
+  };
+
+  const computeFileHash = async (file: File): Promise<string> => {
+    try {
+      if (typeof crypto !== 'undefined' && crypto.subtle) {
+        const buffer = await file.arrayBuffer();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+      }
+    } catch {
+      // Fallback if subtle crypto is unsupported
+    }
+    return '';
+  };
+
+  const uploadAndProfileOne = async (file: File, contentHash?: string) => {
     setPhase('uploading');
     setProfileResult(null);
     setUploadProgress(null);
@@ -76,7 +114,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
       setProfileResult(preprocessed);
       setPhase('done');
 
-      onFileUploaded(sourceFile, preprocessed);
+      onFileUploaded(sourceFile, preprocessed, contentHash);
       return true;
     } catch (err: any) {
       setError(err.message || 'File upload or preprocessing failed');
@@ -92,14 +130,14 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
   /** Organization mode: upload several selected files sequentially through the
    *  existing ingestion path, reporting failures per file and letting the user
    *  retry only what failed. */
-  const uploadMany = async (files: File[]) => {
+  const uploadMany = async (items: { file: File; hash: string }[]) => {
     setError(null);
     setFailedFiles([]);
     let succeeded = 0;
-    for (let i = 0; i < files.length; i += 1) {
-      const file = files[i];
-      setUploadProgress(`File ${i + 1} of ${files.length}`);
-      const ok = await uploadAndProfileOne(file);
+    for (let i = 0; i < items.length; i += 1) {
+      const { file, hash } = items[i];
+      setUploadProgress(`File ${i + 1} of ${items.length}`);
+      const ok = await uploadAndProfileOne(file, hash);
       if (ok) {
         succeeded += 1;
       } else {
@@ -112,20 +150,46 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
     setUploadProgress(null);
   };
 
-  const handleFiles = (files: File[]) => {
+  const handleFiles = async (files: File[]) => {
     const supported = files.filter((f) => /\.(csv|xlsx)$/i.test(f.name));
     const unsupported = files.filter((f) => !/\.(csv|xlsx)$/i.test(f.name));
     if (unsupported.length > 0) {
       setFailedFiles((prev) => [
         ...prev,
-        ...unsupported.map((f) => ({ filename: f.name, message: 'Only CSV and XLSX files are supported' })),
+        ...unsupported.map((f) => ({
+          filename: f.name,
+          message: 'Only CSV and XLSX spreadsheet files are supported.',
+        })),
       ]);
     }
     if (supported.length === 0) return;
-    if (isOrganization && supported.length > 1) {
-      void uploadMany(supported);
+
+    // Batch 8: Content-hash duplicate detection.
+    // Filename similarity or file size alone never blocks upload.
+    const toUpload: { file: File; hash: string }[] = [];
+    for (const f of supported) {
+      const hash = await computeFileHash(f);
+      if (hash) {
+        const existingDuplicate = datasets.find((d) => d.contentHash && d.contentHash === hash);
+        if (existingDuplicate) {
+          setFailedFiles((prev) => [
+            ...prev,
+            {
+              filename: f.name,
+              message: `Identical contents to "${existingDuplicate.label || existingDuplicate.name}". To replace it, remove the existing file first.`,
+            },
+          ]);
+          continue;
+        }
+      }
+      toUpload.push({ file: f, hash });
+    }
+
+    if (toUpload.length === 0) return;
+    if (isOrganization && toUpload.length > 1) {
+      void uploadMany(toUpload);
     } else {
-      void uploadAndProfileOne(supported[0]);
+      void uploadAndProfileOne(toUpload[0].file, toUpload[0].hash);
     }
   };
 
@@ -159,12 +223,12 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
         <div>
           <h3 className="card-title">
             <UploadCloud size={19} />{' '}
-            {isOrganization ? 'File upload & pre-flight check' : 'Dataset upload & preprocessing'}
+            {isOrganization ? 'Upload files & check data' : 'Upload spreadsheets & check data'}
           </h3>
           <p className="card-description">
             {isOrganization
-              ? 'Add your CSV or XLSX files together (e.g. academic register, hostel allocation, ID card export). Each file is checked for quality before any records are compared.'
-              : 'Upload CSV or XLSX source files for normalization, schema inference, and verification.'}
+              ? 'Add your CSV or Excel files (e.g. academic register, hostel allocation, ID card export). Each file is checked for data quality before any records are compared.'
+              : 'Upload CSV or Excel files to check column names, count rows, and find potential matching keys before comparing.'}
           </p>
         </div>
       </div>
@@ -215,7 +279,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
         onDragLeave={handleDragLeave}
         role="button"
         tabIndex={0}
-        aria-label={isOrganization ? 'Upload one or more CSV or XLSX files' : 'Upload dataset file'}
+        aria-label={isOrganization ? 'Upload one or more CSV or Excel files' : 'Upload spreadsheet file'}
         aria-disabled={busy}
         onKeyDown={(e) => {
           if ((e.key === 'Enter' || e.key === ' ') && !busy) {
@@ -240,15 +304,15 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
           {phase === 'uploading'
             ? uploadProgress || 'Uploading file…'
             : phase === 'profiling'
-              ? 'Preprocessing dataset…'
+              ? 'Checking spreadsheet…'
               : isOrganization
-                ? 'Drop your CSV or XLSX files here'
-                : 'Drop a CSV or XLSX file here'}
+                ? 'Drop your CSV or Excel files here'
+                : 'Drop a CSV or Excel file here'}
         </h4>
         <p className="dropzone-hint">
           or <span className="link-accent">browse local files</span>
           {isOrganization ? ' — you can select several files at once' : ''} — up to 100,000 data rows per
-          dataset
+          file
         </p>
       </div>
 
@@ -260,7 +324,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
           </span>
           <span className={`step-pill ${phase === 'profiling' ? 'active' : 'done'}`}>
             {phase === 'profiling' ? <span className="spinner" /> : <Check size={13} />}
-            Inferring schema &amp; normalizing
+            Checking columns &amp; data format
           </span>
         </div>
       )}
@@ -287,10 +351,10 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
               }
             >
               <ShieldAlert size={13} className="text-accent" />
-              Pre-flight &amp; Quarantine
+              Check Data &amp; Review Items
             </button>
             <span className="badge badge-success">
-              <span className="badge-dot" aria-hidden="true" /> Preprocessed
+              <span className="badge-dot" aria-hidden="true" /> Checked
             </span>
           </div>
 
@@ -316,7 +380,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
           </div>
 
           <div className="schema-block">
-            <h5 className="schema-title">Inferred schema &amp; normalized columns</h5>
+            <h5 className="schema-title">Detected columns &amp; data types</h5>
             <div className="chip-list">
               {profileResult.columns.map((col) => (
                 <div key={col.normalized_name} className="chip" title={col.original_name}>
@@ -329,13 +393,92 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
         </div>
       )}
 
+      {isOrganization && (
+        <div
+          className="source-mode-panel card"
+          style={{
+            marginTop: 16,
+            marginBottom: 16,
+            padding: '14px 16px',
+            backgroundColor: 'var(--bg-subtle, rgba(255,255,255,0.02))',
+            border: '1px solid var(--border-color, rgba(255,255,255,0.08))',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <Database size={16} className="text-accent" />
+            <strong style={{ fontSize: '0.92rem' }}>Authoritative source setup</strong>
+          </div>
+          <p className="text-dim" style={{ fontSize: '0.82rem', margin: '0 0 12px 0' }}>
+            Choose whether comparison relies on one main file or multiple authoritative files before assigning file roles below:
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+            <label
+              className={`setup-mode-card ${!multiPrimary ? 'selected' : ''}`}
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 10,
+                padding: '10px 12px',
+                borderRadius: 'var(--radius-sm, 6px)',
+                border: !multiPrimary ? '1px solid var(--accent, #3b82f6)' : '1px solid var(--border-color, rgba(255,255,255,0.1))',
+                backgroundColor: !multiPrimary ? 'var(--accent-subtle, rgba(59,130,246,0.08))' : 'transparent',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="radio"
+                name="authoritative-source-mode"
+                checked={!multiPrimary}
+                onChange={() => onMultiPrimaryChange?.(false)}
+                style={{ marginTop: 3 }}
+              />
+              <div>
+                <strong style={{ fontSize: '0.88rem', display: 'block' }}>Single authoritative source (default)</strong>
+                <span className="text-dim" style={{ fontSize: '0.78rem', lineHeight: 1.35, display: 'block', marginTop: 2 }}>
+                  Exactly one main file to trust (e.g. Academic Register). All other files are checked against it.
+                </span>
+              </div>
+            </label>
+            <label
+              className={`setup-mode-card ${multiPrimary ? 'selected' : ''}`}
+              style={{
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 10,
+                padding: '10px 12px',
+                borderRadius: 'var(--radius-sm, 6px)',
+                border: multiPrimary ? '1px solid var(--accent, #3b82f6)' : '1px solid var(--border-color, rgba(255,255,255,0.1))',
+                backgroundColor: multiPrimary ? 'var(--accent-subtle, rgba(59,130,246,0.08))' : 'transparent',
+                cursor: 'pointer',
+              }}
+            >
+              <input
+                type="radio"
+                name="authoritative-source-mode"
+                checked={multiPrimary}
+                onChange={() => onMultiPrimaryChange?.(true)}
+                style={{ marginTop: 3 }}
+              />
+              <div>
+                <strong style={{ fontSize: '0.88rem', display: 'block' }}>Multiple authoritative sources</strong>
+                <span className="text-dim" style={{ fontSize: '0.78rem', lineHeight: 1.35, display: 'block', marginTop: 2 }}>
+                  Multiple files can be authoritative. Each field can have its own authoritative source (e.g. SIS for student info, Hostel for allocations).
+                </span>
+              </div>
+            </label>
+          </div>
+        </div>
+      )}
+
       {datasets.length > 0 && (
         <div className="file-list">
           <div className="file-list-title">
-            {isOrganization ? 'Session files' : 'Session datasets'} ({datasets.length})
+            {isOrganization ? 'Session files' : 'Session spreadsheets'} ({datasets.length})
             {isOrganization
-              ? ' — mark one file as the primary source; the rest are checked against it'
-              : ' — upload at least two to reconcile'}
+              ? multiPrimary
+                ? ' — mark one or more authoritative files; assign field ownership in Step 2'
+                : ' — mark one file as the main file to trust; the rest are checked against it'
+              : ' — upload at least two to compare'}
           </div>
           {datasets.map((dataset) => {
             const dupeRows = dataset.profile?.duplicate_rows_count ?? 0;
@@ -369,9 +512,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
                       </span>
                     )}
                   </span>
-                  {/* Batch 7: explicit worksheet selection for XLSX workbooks. The
-                      workbook's sheet names come from profiling metadata; no sheet is
-                      used for verification until the user explicitly chooses one. */}
+                  {/* Batch 7: explicit worksheet selection for XLSX workbooks. */}
                   {isOrganization && (dataset.profile?.sheet_names?.length ?? 0) > 0 && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
                       <select
@@ -393,6 +534,30 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
                       )}
                     </div>
                   )}
+                  {/* Batch 7: explicit header row selection when candidate rows exist */}
+                  {(dataset.profile?.header_row_candidates?.length ?? 0) > 1 && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                      <span className="text-dim" style={{ fontSize: '0.78rem' }}>Header row:</span>
+                      <select
+                        className="form-select"
+                        value={dataset.headerRow ?? dataset.profile?.detected_header_row ?? 1}
+                        onChange={(e) => onHeaderRowChange?.(dataset.id, parseInt(e.target.value, 10))}
+                        aria-label={`Header row for ${dataset.label || dataset.name}`}
+                        style={{ fontSize: '0.78rem', padding: '2px 6px', maxWidth: 220 }}
+                      >
+                        {dataset.profile!.header_row_candidates!.map((cand) => (
+                          <option key={cand.row_number} value={cand.row_number}>
+                            Row {cand.row_number} ({cand.columns.length} columns){cand.is_likely_header ? ' — Recommended' : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {dataset.profile?.detected_header_row && dataset.profile.detected_header_row > 1 && (
+                        <span className="badge badge-neutral" style={{ fontSize: '0.72rem' }} title="Row 1 appeared to be a title banner; headers were automatically detected at Row 2">
+                          Auto-detected Row {dataset.profile.detected_header_row}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 {isOrganization && (
                   <>
@@ -404,20 +569,24 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
                       <button
                         type="button"
                         className={`btn btn-xs ${dataset.isPrimary ? 'btn-primary' : 'btn-secondary'}`}
-                        onClick={() => onRoleChange?.(dataset.id, true)}
+                        onClick={() => handleSetPrimary(dataset.id)}
                         aria-pressed={dataset.isPrimary}
-                        title="Primary source — authoritative values other files are checked against"
+                        title={
+                          multiPrimary
+                            ? "Authoritative source — this file provides authoritative values for fields it owns"
+                            : "Main file to trust — authoritative values other files are checked against"
+                        }
                       >
-                        <Star size={12} /> Primary source
+                        <Star size={12} /> {multiPrimary ? 'Authoritative source' : 'Main file to trust'}
                       </button>
                       <button
                         type="button"
                         className={`btn btn-xs ${dataset.isPrimary ? 'btn-secondary' : 'btn-primary'}`}
                         onClick={() => onRoleChange?.(dataset.id, false)}
                         aria-pressed={!dataset.isPrimary}
-                        title="Target to verify — its values are compared with the primary source"
+                        title="File to check — its values are compared with the authoritative file"
                       >
-                        Target
+                        File to check
                       </button>
                     </div>
                     {dupeRows > 0 && (
@@ -437,10 +606,10 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
                   className="btn btn-secondary btn-xs"
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}
                   onClick={() => setDrawerFile({ id: dataset.id, name: dataset.label || dataset.name, worksheet: dataset.selectedSheet ?? null })}
-                  title="Inspect profiling metrics and quarantine anomalies"
+                  title="Inspect spreadsheet metrics and review flagged items"
                 >
                   <ShieldAlert size={12} className="text-accent" />
-                  Pre-flight Profile
+                  Check Data
                 </button>
                 {isOrganization && onRemoveFile && (
                   <button
@@ -472,13 +641,13 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
           <span>
             {isOrganization ? (
               <>
-                <strong>Tip:</strong> add your authoritative file first (e.g. academic register), then the files to
+                <strong>Tip:</strong> add your main file to trust first (e.g. academic register), then the files to
                 check against it (e.g. ID cards, hostel list).
               </>
             ) : (
               <>
-                <strong>Tip:</strong> upload both a baseline (source) and a comparison (target) dataset
-                to unlock the reconciliation engine.
+                <strong>Tip:</strong> upload both a main file to trust and a comparison file
+                to start comparing records.
               </>
             )}
           </span>
@@ -489,8 +658,8 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
         <div className="info-strip" style={{ marginTop: 16, marginBottom: 0 }}>
           <ListChecks size={15} />
           <span>
-            {profileResult.issues.length} validation note
-            {profileResult.issues.length === 1 ? '' : 's'} detected during preprocessing (e.g.{' '}
+            {profileResult.issues.length} item
+            {profileResult.issues.length === 1 ? '' : 's'} needing attention found during checking (e.g.{' '}
             {profileResult.issues[0].message}).
           </span>
         </div>

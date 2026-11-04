@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BookmarkPlus,
   CheckCircle2,
+  Clock,
   FileInput,
   Pencil,
   RefreshCw,
@@ -61,7 +62,12 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
   const [selectedId, setSelectedId] = useState<string>('');
   const [slotBindings, setSlotBindings] = useState<Record<string, string>>({});
 
+  const [loadingTemplates, setLoadingTemplates] = useState<boolean>(mode === 'organization');
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const [busy, setBusy] = useState<string | null>(null);
+  // Synchronous shared lock preventing duplicate submissions across all mutations
+  const mutationLockRef = useRef<boolean>(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<TemplateValidationIssue[]>([]);
@@ -83,19 +89,42 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
   const modeIsOrg = mode === 'organization';
 
   const loadTemplates = useCallback(async () => {
+    setLoadingTemplates(true);
+    setLoadError(null);
     try {
       const list = await api.listTemplates('organization');
       setTemplates(list);
     } catch (err: any) {
-      setError(err.message || 'Failed to load templates.');
+      setLoadError(err.message || 'Failed to load templates.');
+    } finally {
+      setLoadingTemplates(false);
     }
   }, []);
 
   useEffect(() => {
-    if (modeIsOrg) {
-      void loadTemplates();
-    }
-  }, [modeIsOrg, loadTemplates]);
+    if (!modeIsOrg) return;
+    let cancelled = false;
+    const fetchInitial = async () => {
+      try {
+        const list = await api.listTemplates('organization');
+        if (!cancelled) {
+          setTemplates(list);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setLoadError(err.message || 'Failed to load templates.');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingTemplates(false);
+        }
+      }
+    };
+    void fetchInitial();
+    return () => {
+      cancelled = true;
+    };
+  }, [modeIsOrg]);
 
   // --- Helpers (pure) -------------------------------------------------------
 
@@ -134,6 +163,19 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
       setWarnings([]);
       setError(err.message || 'Failed to apply template.');
     }
+  };
+
+  const acquireMutationLock = (actionName: string): boolean => {
+    if (mutationLockRef.current || busy) return false;
+    mutationLockRef.current = true;
+    setBusy(actionName);
+    resetFeedback();
+    return true;
+  };
+
+  const releaseMutationLock = () => {
+    mutationLockRef.current = false;
+    setBusy(null);
   };
 
   // --- Early return after all hooks ----------------------------------------
@@ -190,21 +232,20 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
   // --- Apply (backend revalidates every binding) ----------------------------
 
   const handleApply = async () => {
-    if (!selectedId || !selectedTemplate) return;
-    if (slots.length < 2) {
-      setError('This template has fewer than two source slots and cannot be applied.');
-      return;
-    }
-    if (unassignedSlots.length > 0) {
-      setError(
-        `Assign a file to every template slot before applying. Unassigned: ${unassignedSlots.join(', ')}.`,
-      );
-      return;
-    }
-
-    setBusy('apply');
-    resetFeedback();
+    if (!acquireMutationLock('apply')) return;
     try {
+      if (!selectedId || !selectedTemplate) return;
+      if (slots.length < 2) {
+        setError('This template has fewer than two source slots and cannot be applied.');
+        return;
+      }
+      if (unassignedSlots.length > 0) {
+        setError(
+          `Assign a file to every template slot before applying. Unassigned: ${unassignedSlots.join(', ')}.`,
+        );
+        return;
+      }
+
       const resp = await api.applyTemplate(selectedId, {
         project_id: project.id,
         sources: slots.map((slot) => ({
@@ -212,6 +253,12 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
           file_id: slotBindings[slot.alias],
         })),
       });
+      if (resp.validation_report?.blocking) {
+        setIssues(resp.validation_report.issues ?? []);
+        setWarnings(resp.validation_report.warnings ?? []);
+        setError('Template application blocked — fix the issues below, then apply again.');
+        return;
+      }
       setReport(resp);
       setWarnings(resp.validation_report?.warnings ?? []);
       setMessage(
@@ -224,26 +271,25 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
     } catch (err: any) {
       applyErrorFeedback(err);
     } finally {
-      setBusy(null);
+      releaseMutationLock();
     }
   };
 
   // --- Create a NEW template from the current wizard configuration ----------
 
   const handleCreate = async () => {
-    const config = getCurrentConfiguration();
-    if (!config) {
-      setError('Upload and map at least 2 files before saving a template.');
-      return;
-    }
-    const name = saveName.trim();
-    if (!name) {
-      setError('Enter a template name.');
-      return;
-    }
-    setBusy('create');
-    resetFeedback();
+    if (!acquireMutationLock('create')) return;
     try {
+      const config = getCurrentConfiguration();
+      if (!config) {
+        setError('Upload and map at least 2 files before saving a template.');
+        return;
+      }
+      const name = saveName.trim();
+      if (!name) {
+        setError('Enter a template name.');
+        return;
+      }
       const created = await api.createTemplate({
         name,
         description: saveDescription.trim() || null,
@@ -256,9 +302,12 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
       setSaveOpen(false);
       await loadTemplates();
     } catch (err: any) {
-      setError(err.message || 'Failed to save template.');
+      const msg = err.message?.includes('Network error')
+        ? "We couldn't connect to VerifyGrid to save this setup. Check your connection and try again."
+        : (err.message || 'Failed to save template.');
+      setError(msg);
     } finally {
-      setBusy(null);
+      releaseMutationLock();
     }
   };
 
@@ -277,14 +326,13 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
 
   const handleDetailsSave = async () => {
     if (!selectedId) return;
-    const name = detailsName.trim();
-    if (!name) {
-      setError('Enter a valid template name.');
-      return;
-    }
-    setBusy('details');
-    resetFeedback();
+    if (!acquireMutationLock('details')) return;
     try {
+      const name = detailsName.trim();
+      if (!name) {
+        setError('Enter a valid template name.');
+        return;
+      }
       const updated = await api.updateTemplate(selectedId, {
         name,
         // '' clears the description; the backend stores empty as NULL.
@@ -294,9 +342,12 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
       setDetailsOpen(false);
       await loadTemplates();
     } catch (err: any) {
-      setError(err.message || 'Failed to update template details.');
+      const msg = err.message?.includes('Network error')
+        ? "We couldn't connect to VerifyGrid to update template details. Check your connection and try again."
+        : (err.message || 'Failed to update template details.');
+      setError(msg);
     } finally {
-      setBusy(null);
+      releaseMutationLock();
     }
   };
 
@@ -313,14 +364,13 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
 
   const handleConfigUpdate = async () => {
     if (!selectedId || !selectedTemplate) return;
-    const config = getCurrentConfiguration();
-    if (!config) {
-      setError('Upload and map at least 2 files before updating a template.');
-      return;
-    }
-    setBusy('config');
-    resetFeedback();
+    if (!acquireMutationLock('config')) return;
     try {
+      const config = getCurrentConfiguration();
+      if (!config) {
+        setError('Upload and map at least 2 files before updating a template.');
+        return;
+      }
       const updated = await api.updateTemplate(selectedId, { configuration: config });
       setMessage(
         `Replaced the saved configuration of '${updated.name}'. Name and description were not changed.`,
@@ -328,9 +378,12 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
       setConfigUpdateOpen(false);
       await loadTemplates();
     } catch (err: any) {
-      setError(err.message || 'Failed to update template configuration.');
+      const msg = err.message?.includes('Network error')
+        ? "We couldn't connect to VerifyGrid to update template configuration. Check your connection and try again."
+        : (err.message || 'Failed to update template configuration.');
+      setError(msg);
     } finally {
-      setBusy(null);
+      releaseMutationLock();
     }
   };
 
@@ -338,8 +391,7 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
 
   const handleDelete = async () => {
     if (!selectedId || !selectedTemplate) return;
-    setBusy('delete');
-    resetFeedback();
+    if (!acquireMutationLock('delete')) return;
     try {
       await api.deleteTemplate(selectedId);
       setDeleteOpen(false);
@@ -349,9 +401,12 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
       setMessage(`Deleted template '${selectedTemplate.name}'.`);
       await loadTemplates();
     } catch (err: any) {
-      setError(err.message || 'Failed to delete template.');
+      const msg = err.message?.includes('Network error')
+        ? "We couldn't connect to VerifyGrid to delete this template. Check your connection and try again."
+        : (err.message || 'Failed to delete template.');
+      setError(msg);
     } finally {
-      setBusy(null);
+      releaseMutationLock();
     }
   };
 
@@ -369,11 +424,11 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
         border: '1px solid var(--border-subtle, transparent)',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <FileInput size={16} className="text-accent" />
-        <strong style={{ fontSize: '0.9rem' }}>Reusable verification templates</strong>
-        <span className="text-dim" style={{ fontSize: '0.75rem' }}>
-          personal templates — validate columns, worksheets &amp; keys against your new uploads
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+        <FileInput size={16} className="text-accent" style={{ flexShrink: 0 }} />
+        <strong style={{ fontSize: '0.9rem' }}>Saved setups (templates)</strong>
+        <span className="text-dim" style={{ fontSize: '0.75rem', minWidth: 0, flex: '1 1 220px' }}>
+          personal setups — reuse your column choices, worksheets &amp; keys on new files
         </span>
       </div>
 
@@ -385,8 +440,15 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
           className="input"
           style={{ minWidth: 260, maxWidth: 420 }}
           aria-label="Choose a saved template"
+          disabled={loadingTemplates}
         >
-          <option value="">— Start without a template —</option>
+          {loadingTemplates ? (
+            <option value="">Loading saved setups…</option>
+          ) : templates.length === 0 ? (
+            <option value="">— No saved setups yet —</option>
+          ) : (
+            <option value="">— Start without a saved setup —</option>
+          )}
           {templates.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name} ({t.source_count} files, v{t.config_version})
@@ -394,10 +456,16 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
           ))}
         </select>
 
+        {loadingTemplates && (
+          <span className="text-dim" style={{ fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <Clock size={12} className="text-accent" /> Loading setups…
+          </span>
+        )}
+
         <button
           type="button"
           className="btn btn-secondary btn-sm"
-          disabled={!selectedId || busy === 'apply' || uploadedDatasets.length < 2}
+          disabled={!selectedId || busy === 'apply' || uploadedDatasets.length < 2 || loadingTemplates}
           onClick={() => void handleApply()}
         >
           {busy === 'apply' ? 'Validating…' : 'Apply to uploaded files'}
@@ -406,7 +474,7 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
         <button
           type="button"
           className="btn btn-secondary btn-sm"
-          disabled={busy === 'create'}
+          disabled={busy === 'create' || loadingTemplates}
           onClick={() => {
             resetFeedback();
             setDetailsOpen(false);
@@ -453,6 +521,41 @@ export const TemplatePanel: React.FC<TemplatePanelProps> = ({
           </>
         )}
       </div>
+
+      {/* Empty state when no templates exist and not loading */}
+      {!loadingTemplates && !loadError && templates.length === 0 && (
+        <div className="text-dim" style={{ marginTop: 8, fontSize: '0.78rem' }}>
+          No saved setups yet. Once you set up and match your spreadsheet columns, you can save your setup as a template to reuse it later.
+        </div>
+      )}
+
+      {/* Loading error with retry action */}
+      {loadError && (
+        <div
+          className="alert alert-error"
+          style={{
+            marginTop: 10,
+            fontSize: '0.8rem',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <XCircle size={14} className="text-error" style={{ flexShrink: 0 }} />
+            <span>{loadError}</span>
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary btn-xs"
+            onClick={() => void loadTemplates()}
+            disabled={loadingTemplates}
+          >
+            <RefreshCw size={12} className={loadingTemplates ? 'spin' : ''} /> Retry
+          </button>
+        </div>
+      )}
 
       {/* Save-as-new panel */}
       {saveOpen && (

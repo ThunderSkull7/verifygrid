@@ -171,18 +171,250 @@ def test_remote_target_is_rejected_without_guard_variables():
         env_mod.validate_target_url(REMOTE_URL, {})
 
 
-def test_remote_target_requires_both_guard_variables():
-    with pytest.raises(env_mod.MigrationTargetError, match="non-loopback"):
+def test_old_generic_remote_target_is_rejected():
+    """Prove the old permissive un-targeted remote target (Batch 25) fails closed."""
+    with pytest.raises(env_mod.MigrationTargetError):
         env_mod.validate_target_url(REMOTE_URL, {env_mod.ALLOW_REMOTE_ENV: "1"})
-    with pytest.raises(env_mod.MigrationTargetError, match="non-loopback"):
+    with pytest.raises(env_mod.MigrationTargetError):
         env_mod.validate_target_url(REMOTE_URL, {env_mod.ACK_ENV: "CHG-123"})
+    with pytest.raises(env_mod.MigrationTargetError, match="permitted Neon direct hostname pattern"):
+        env_mod.validate_target_url(
+            REMOTE_URL,
+            {env_mod.ALLOW_REMOTE_ENV: "1", env_mod.ACK_ENV: "CHG-123"},
+        )
 
+
+# =============================================================================
+# Batch 15: Target-Bound Staging & Production Authorization Test Suite
+# =============================================================================
+
+VALID_STAGING_ENDPOINT = "ep-staging-rehearsal-123456"
+VALID_STAGING_URL = (
+    f"postgresql+psycopg://neondb_owner:secret@{VALID_STAGING_ENDPOINT}.ap-southeast-1.aws.neon.tech/neondb"
+)
+
+VALID_PROD_ENDPOINT = "ep-round-sea-b3b78mtc"
+VALID_PROD_URL = (
+    f"postgresql+psycopg://neondb_owner:secret@{VALID_PROD_ENDPOINT}.c-4.ap-southeast-1.aws.neon.tech/neondb"
+)
+
+POOLED_STAGING_URL = (
+    f"postgresql+psycopg://neondb_owner:secret@{VALID_STAGING_ENDPOINT}-pooler.ap-southeast-1.aws.neon.tech/neondb"
+)
+
+
+def test_staging_authorization_success_via_environment():
+    """Staging authorization succeeds when target-bound ack matches endpoint ID."""
     url, loopback = env_mod.validate_target_url(
-        REMOTE_URL,
-        {env_mod.ALLOW_REMOTE_ENV: "1", env_mod.ACK_ENV: "CHG-123"},
+        VALID_STAGING_URL,
+        {
+            env_mod.ALLOW_STAGING_ENV: "1",
+            env_mod.STAGING_ACK_ENV: VALID_STAGING_ENDPOINT,
+        },
     )
     assert loopback is False
-    assert url.database == "verifygrid"
+    assert url.database == "neondb"
+    assert url.username == "neondb_owner"
+
+
+def test_staging_authorization_success_via_cli_x_args():
+    """Staging authorization succeeds with per-invocation -x arguments."""
+    url, loopback = env_mod.validate_target_url(
+        VALID_STAGING_URL,
+        {},
+        x_args={"target": "staging", "ack": VALID_STAGING_ENDPOINT},
+    )
+    assert loopback is False
+    assert url.database == "neondb"
+
+
+def test_production_authorization_success_via_environment():
+    """Production authorization succeeds with exact production endpoint and ack."""
+    url, loopback = env_mod.validate_target_url(
+        VALID_PROD_URL,
+        {
+            env_mod.ALLOW_PRODUCTION_ENV: "1",
+            env_mod.PRODUCTION_ACK_ENV: f"CONFIRM-PRODUCTION-{VALID_PROD_ENDPOINT}",
+        },
+    )
+    assert loopback is False
+    assert url.database == "neondb"
+
+
+def test_production_authorization_success_via_cli_x_args():
+    """Production authorization succeeds with per-invocation -x arguments."""
+    url, loopback = env_mod.validate_target_url(
+        VALID_PROD_URL,
+        {},
+        x_args={"target": "production", "ack": VALID_PROD_ENDPOINT},
+    )
+    assert loopback is False
+
+
+def test_staging_ack_against_production_endpoint_fails_closed():
+    """Staging credentials MUST NOT authorize production endpoint."""
+    with pytest.raises(env_mod.MigrationTargetError, match="known production endpoint"):
+        env_mod.validate_target_url(
+            VALID_PROD_URL,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.STAGING_ACK_ENV: VALID_PROD_ENDPOINT,
+            },
+        )
+
+
+def test_production_ack_against_staging_endpoint_fails_closed():
+    """Production credentials MUST NOT authorize staging endpoint."""
+    with pytest.raises(env_mod.MigrationTargetError, match="does not match expected production endpoint"):
+        env_mod.validate_target_url(
+            VALID_STAGING_URL,
+            {
+                env_mod.ALLOW_PRODUCTION_ENV: "1",
+                env_mod.PRODUCTION_ACK_ENV: f"CONFIRM-PRODUCTION-{VALID_PROD_ENDPOINT}",
+            },
+        )
+
+
+def test_wrong_staging_endpoint_id_fails_closed():
+    """Mismatched acknowledgement fails closed."""
+    with pytest.raises(env_mod.MigrationTargetError, match="does not match target endpoint ID"):
+        env_mod.validate_target_url(
+            VALID_STAGING_URL,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.STAGING_ACK_ENV: "ep-different-endpoint-999999",
+            },
+        )
+
+
+def test_wrong_database_name_fails_closed():
+    """Non-neondb database name fails closed."""
+    bad_db_url = f"postgresql+psycopg://neondb_owner:secret@{VALID_STAGING_ENDPOINT}.neon.tech/wrong_db"
+    with pytest.raises(env_mod.MigrationTargetError, match="Invalid staging database name"):
+        env_mod.validate_target_url(
+            bad_db_url,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.STAGING_ACK_ENV: VALID_STAGING_ENDPOINT,
+            },
+        )
+
+
+def test_wrong_database_role_fails_closed():
+    """Non-neondb_owner role fails closed."""
+    bad_role_url = f"postgresql+psycopg://wrong_user:secret@{VALID_STAGING_ENDPOINT}.neon.tech/neondb"
+    with pytest.raises(env_mod.MigrationTargetError, match="Invalid staging database role"):
+        env_mod.validate_target_url(
+            bad_role_url,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.STAGING_ACK_ENV: VALID_STAGING_ENDPOINT,
+            },
+        )
+
+
+def test_missing_acknowledgement_fails_closed():
+    """Missing acknowledgement flag fails closed."""
+    with pytest.raises(env_mod.MigrationTargetError, match="target-bound acknowledgement"):
+        env_mod.validate_target_url(
+            VALID_STAGING_URL,
+            {env_mod.ALLOW_STAGING_ENV: "1"},
+        )
+
+
+def test_empty_acknowledgement_fails_closed():
+    """Whitespace-only acknowledgement fails closed."""
+    with pytest.raises(env_mod.MigrationTargetError, match="target-bound acknowledgement"):
+        env_mod.validate_target_url(
+            VALID_STAGING_URL,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.STAGING_ACK_ENV: "   ",
+            },
+        )
+
+
+def test_malformed_hostname_pattern_fails_closed():
+    """Non-Neon hostname fails closed."""
+    malformed_url = "postgresql+psycopg://neondb_owner:secret@non-neon-host.example.com/neondb"
+    with pytest.raises(env_mod.MigrationTargetError, match="permitted Neon direct hostname pattern"):
+        env_mod.validate_target_url(
+            malformed_url,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.STAGING_ACK_ENV: "non-neon-host",
+            },
+        )
+
+
+def test_pooled_endpoint_rejected_for_schema_migrations():
+    """Pooled endpoints containing -pooler are explicitly rejected."""
+    with pytest.raises(env_mod.MigrationTargetError, match="pooled endpoint"):
+        env_mod.validate_target_url(
+            POOLED_STAGING_URL,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.STAGING_ACK_ENV: VALID_STAGING_ENDPOINT,
+            },
+        )
+
+
+def test_conflicting_authorization_flags_fail_closed():
+    """Enabling both staging and production simultaneously fails closed."""
+    with pytest.raises(env_mod.MigrationTargetError, match="Conflicting authorization"):
+        env_mod.validate_target_url(
+            VALID_STAGING_URL,
+            {
+                env_mod.ALLOW_STAGING_ENV: "1",
+                env_mod.ALLOW_PRODUCTION_ENV: "1",
+                env_mod.STAGING_ACK_ENV: VALID_STAGING_ENDPOINT,
+            },
+        )
+
+
+def test_cli_argument_precedence_over_environment():
+    """CLI -x arguments override ambient environment variables."""
+    url, loopback = env_mod.validate_target_url(
+        VALID_STAGING_URL,
+        {
+            env_mod.ALLOW_STAGING_ENV: "0",
+            env_mod.STAGING_ACK_ENV: "wrong_env_ack",
+        },
+        x_args={"target": "staging", "ack": VALID_STAGING_ENDPOINT},
+    )
+    assert loopback is False
+    assert url.database == "neondb"
+
+
+def test_post_connection_neon_endpoint_mismatch_fails_closed():
+    """Server identity check verifies connected Neon endpoint setting if present."""
+    class _FakeNeonConnection(_FakeConnection):
+        def __init__(self, database, username, address, endpoint):
+            super().__init__(database, username, address)
+            self._endpoint = endpoint
+
+        def execute(self, statement):
+            stmt_str = str(statement)
+            if "neon.endpoint_id" in stmt_str:
+                class _NeonResult:
+                    def __init__(self, ep):
+                        self._ep = ep
+                    def scalar_one_or_none(self):
+                        return self._ep
+                    def one(self):
+                        return (self._ep,)
+                return _NeonResult(self._endpoint)
+            return super().execute(statement)
+
+    # 1. Matching endpoint succeeds
+    conn_match = _FakeNeonConnection("neondb", "neondb_owner", "203.0.113.5", VALID_STAGING_ENDPOINT)
+    env_mod._assert_server_identity(conn_match, make_url(VALID_STAGING_URL), require_loopback=False)
+
+    # 2. Mismatched endpoint fails closed
+    conn_mismatch = _FakeNeonConnection("neondb", "neondb_owner", "203.0.113.5", "ep-unexpected-rogue-endpoint")
+    with pytest.raises(env_mod.MigrationTargetError, match="does not match expected target endpoint"):
+        env_mod._assert_server_identity(conn_mismatch, make_url(VALID_STAGING_URL), require_loopback=False)
+
 
 
 def test_redirect_query_parameters_are_rejected():

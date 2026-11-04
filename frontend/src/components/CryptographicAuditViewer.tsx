@@ -96,10 +96,10 @@ export const CryptographicAuditViewer: React.FC<CryptographicAuditViewerProps> =
       >
         <div>
           <h4 style={{ margin: 0, fontSize: '1.05rem', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <LinkIcon size={18} className="text-accent" /> Cryptographic Audit Trail &amp; Hash Chain
+            <LinkIcon size={18} className="text-accent" /> Tamper-Evident Audit Trail
           </h4>
           <p className="text-dim" style={{ margin: '4px 0 0', fontSize: '0.8rem' }}>
-            Append-only tamper-evident event log chained via SHA-256 cryptographic hashes from genesis seed.
+            Tamper-evident event log verifying that all review decisions and actions remain intact and verifiable.
           </p>
         </div>
 
@@ -125,7 +125,7 @@ export const CryptographicAuditViewer: React.FC<CryptographicAuditViewerProps> =
             ) : (
               <ShieldCheck size={14} />
             )}
-            Verify Audit Chain
+            Verify Audit Trail
           </button>
         </div>
       </div>

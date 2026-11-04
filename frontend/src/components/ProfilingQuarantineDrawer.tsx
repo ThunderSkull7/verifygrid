@@ -180,6 +180,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
         zIndex: 1000,
         display: 'flex',
         justifyContent: 'flex-end',
+        padding: 0,
         backdropFilter: 'blur(3px)',
       }}
       onClick={(e) => {
@@ -194,40 +195,21 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
         tabIndex={-1}
         className="drawer-panel"
         style={{
-          width: '100%',
-          maxWidth: 'min(920px, 100vw)',
-          height: '100vh',
-          backgroundColor: 'var(--bg-card)',
-          boxShadow: 'var(--shadow-lg)',
-          display: 'flex',
-          flexDirection: 'column',
-          borderLeft: '1px solid var(--border-color)',
-          overflow: 'hidden',
           animation: 'slideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
-          outline: 'none',
         }}
       >
         {/* Header */}
-        <div
-          style={{
-            padding: '20px 24px',
-            borderBottom: '1px solid var(--border-color)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            backgroundColor: 'var(--bg-secondary)',
-          }}
-        >
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="drawer-header">
+          <div className="drawer-header-copy">
+            <div className="drawer-title-row">
               <Database size={20} className="text-accent" />
-              <h2 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 600 }}>
-                Pre-flight Profiling &amp; Quarantine
+              <h2 className="drawer-title">
+                Check Data &amp; Review Items
               </h2>
-              <span className="badge badge-neutral">{filename}</span>
+              <span className="badge badge-neutral drawer-filename" title={filename}>{filename}</span>
             </div>
-            <p className="text-dim" style={{ margin: '4px 0 0 0', fontSize: '0.85rem' }}>
-              Inspect data health, candidate key uniqueness, and resolve flagged anomalies before reconciliation.
+            <p className="text-dim drawer-subtitle">
+              Check spreadsheet health, matching column uniqueness, and review flagged items before comparing.
             </p>
           </div>
           <button
@@ -242,16 +224,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
 
         {/* Impact Preview Metrics Strip */}
         {impact && (
-          <div
-            style={{
-              padding: '14px 24px',
-              backgroundColor: 'var(--bg-subtle)',
-              borderBottom: '1px solid var(--border-color)',
-              display: 'grid',
-              gridTemplateColumns: 'repeat(5, 1fr)',
-              gap: 12,
-            }}
-          >
+          <div className="drawer-metrics">
             <div className="metric-card flat" style={{ padding: '8px 12px' }}>
               <span className="metric-label" style={{ fontSize: '0.75rem' }}>Total Rows</span>
               <span className="metric-value" style={{ fontSize: '1.2rem' }}>
@@ -259,19 +232,19 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
               </span>
             </div>
             <div className="metric-card flat" style={{ padding: '8px 12px' }}>
-              <span className="metric-label" style={{ fontSize: '0.75rem' }}>Eligible for Run</span>
+              <span className="metric-label" style={{ fontSize: '0.75rem' }}>Ready to Compare</span>
               <span className="metric-value text-success" style={{ fontSize: '1.2rem' }}>
                 {impact.eligible_rows_count.toLocaleString()}
               </span>
             </div>
             <div className="metric-card flat" style={{ padding: '8px 12px' }}>
-              <span className="metric-label" style={{ fontSize: '0.75rem' }}>Excluded Rows</span>
+              <span className="metric-label" style={{ fontSize: '0.75rem' }}>Excluded from Comparison</span>
               <span className="metric-value text-danger" style={{ fontSize: '1.2rem' }}>
                 {impact.excluded_rows_count.toLocaleString()}
               </span>
             </div>
             <div className="metric-card flat" style={{ padding: '8px 12px' }}>
-              <span className="metric-label" style={{ fontSize: '0.75rem' }}>Blocking Flags</span>
+              <span className="metric-label" style={{ fontSize: '0.75rem' }}>Blocking Issues</span>
               <span className="metric-value" style={{ fontSize: '1.2rem', color: impact.blocking_quarantine_count > 0 ? 'var(--danger)' : 'var(--text-main)' }}>
                 {impact.blocking_quarantine_count}
               </span>
@@ -286,14 +259,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
         )}
 
         {/* Tab Navigation */}
-        <div
-          style={{
-            display: 'flex',
-            borderBottom: '1px solid var(--border-color)',
-            padding: '0 24px',
-            backgroundColor: 'var(--bg-secondary)',
-          }}
-        >
+        <div className="drawer-tabs">
           <button
             type="button"
             className={`tab-btn ${activeTab === 'profiling' ? 'active' : ''}`}
@@ -312,7 +278,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
               gap: 8,
             }}
           >
-            <Table size={16} /> Column Profiles &amp; Keys
+            <Table size={16} /> Columns &amp; Matching Keys
           </button>
           <button
             type="button"
@@ -332,7 +298,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
               gap: 8,
             }}
           >
-            <ShieldAlert size={16} /> Flagged Quarantine Records
+            <ShieldAlert size={16} /> Flagged Items Needing Review
             {quarantineData && quarantineData.records.length > 0 && (
               <span
                 className="badge"
@@ -350,7 +316,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
         </div>
 
         {/* Body content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
+        <div className="drawer-body">
           {error && (
             <div className="alert alert-error" style={{ marginBottom: 16 }}>
               <AlertTriangle size={16} />
@@ -368,17 +334,17 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
           {loading ? (
             <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)' }}>
               <div className="spinner" style={{ margin: '0 auto 12px auto' }} />
-              <p>Analyzing dataset schema, candidate keys, and anomaly flags…</p>
+              <p>Checking spreadsheet columns, possible matching keys, and data issues…</p>
             </div>
           ) : activeTab === 'profiling' && profile ? (
             <div>
               {/* Candidate Keys Section */}
               <div style={{ marginBottom: 28 }}>
                 <h4 style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 12px 0' }}>
-                  <Key size={16} className="text-accent" /> Candidate Key Evaluation
+                  <Key size={16} className="text-accent" /> Possible Matching Columns
                 </h4>
                 {profile.candidate_keys.length === 0 ? (
-                  <p className="text-dim">No natural candidate keys detected with &gt;50% uniqueness.</p>
+                  <p className="text-dim">No unique columns detected that can serve as a matching key.</p>
                 ) : (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
                     {profile.candidate_keys.map((ck) => (
@@ -393,13 +359,13 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                           <strong style={{ fontSize: '0.95rem' }}>{ck.column_name}</strong>
                           {ck.is_viable_key ? (
-                            <span className="badge badge-success">Viable Key</span>
+                            <span className="badge badge-success">Good Matching Key</span>
                           ) : (
-                            <span className="badge badge-warning">Collisions / Nulls</span>
+                            <span className="badge badge-warning">Duplicates or Empty Cells</span>
                           )}
                         </div>
                         <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: 6 }}>
-                          Uniqueness: {(ck.uniqueness_ratio * 100).toFixed(1)}% · Nulls: {ck.null_count} · Collisions: {ck.duplicate_count}
+                          Uniqueness: {(ck.uniqueness_ratio * 100).toFixed(1)}% · Empty cells: {ck.null_count} · Duplicates: {ck.duplicate_count}
                         </div>
                         <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>
                           {ck.recommendation}
@@ -413,19 +379,19 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
               {/* Column Profiling Table */}
               <div>
                 <h4 style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 12px 0' }}>
-                  <Layers size={16} className="text-accent" /> Inferred Schema &amp; Column Metrics ({profile.columns.length})
+                  <Layers size={16} className="text-accent" /> Detected Columns &amp; Statistics ({profile.columns.length})
                 </h4>
                 <div className="table-container" style={{ overflowX: 'auto', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)' }}>
                   <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
                     <thead>
                       <tr>
                         <th>Column</th>
-                        <th>Inferred Type</th>
-                        <th>Nulls (%)</th>
-                        <th>Distinct</th>
+                        <th>Detected Type</th>
+                        <th>Empty Cells (%)</th>
+                        <th>Distinct Values</th>
                         <th>Uniqueness</th>
                         <th>Sample Values</th>
-                        <th>Anomalies</th>
+                        <th>Data Issues</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -485,21 +451,21 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                   gap: 12,
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                   <Filter size={15} className="text-dim" />
                   <select
                     className="form-select filter-select"
                     value={reasonFilter}
                     onChange={(e) => setReasonFilter(e.target.value)}
-                    aria-label="Filter by quarantine reason"
+                    aria-label="Filter by review reason"
                     style={{ fontSize: '0.85rem' }}
                   >
                     <option value="all">All reasons</option>
-                    <option value="MALFORMED_DATE">Malformed Date</option>
+                    <option value="MALFORMED_DATE">Invalid Date Format</option>
                     <option value="INVALID_NUMBER">Invalid Number</option>
                     <option value="DUPLICATE_KEY">Duplicate Key</option>
                     <option value="UNEXPECTED_NEGATIVE_AMOUNT">Unexpected Negative Amount</option>
-                    <option value="SHIFTED_ROW">Shifted Row</option>
+                    <option value="SHIFTED_ROW">Shifted / Misaligned Row</option>
                   </select>
 
                   <select
@@ -515,13 +481,13 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                   </select>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   <button
                     type="button"
                     className="btn btn-secondary btn-sm"
                     onClick={() => handleBatchAction('EXCLUDE')}
                   >
-                    Exclude All
+                    Exclude All Flagged
                   </button>
                   <button
                     type="button"
@@ -536,7 +502,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                     onClick={() => void handleSaveResolutions()}
                     disabled={saving}
                   >
-                    {saving ? <span className="spinner" /> : <Save size={14} />} Save Decisions
+                    {saving ? <span className="spinner" /> : <Save size={14} />} Save Review Decisions
                   </button>
                 </div>
               </div>
@@ -546,14 +512,14 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                   <div className="empty-icon" style={{ margin: '0 auto 12px auto' }}>
                     <ShieldCheck size={28} className="text-success" />
                   </div>
-                  <h3 className="empty-title">Zero records in quarantine</h3>
+                  <h3 className="empty-title">No items needing review</h3>
                   <p className="empty-text">
-                    All rows in this source file passed pre-flight validation clean without blocking anomalies.
+                    All rows in this spreadsheet look clean with no blocking data issues.
                   </p>
                 </div>
               ) : (
                 <div className="table-container" style={{ border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)' }}>
-                  <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+                  <table className="data-table quarantine-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
                     <thead>
                       <tr>
                         <th style={{ width: 80 }}>Row #</th>
@@ -561,7 +527,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                         <th style={{ width: 140 }}>Raw Value</th>
                         <th style={{ width: 150 }}>Reason</th>
                         <th>Message</th>
-                        <th style={{ width: 180, textAlign: 'right' }}>Pre-flight Action</th>
+                        <th style={{ width: 180, textAlign: 'right' }}>Action</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -578,7 +544,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                               <strong>{item.column_name}</strong>
                             </td>
                             <td>
-                              <code className="key-code" style={{ fontSize: '0.8rem' }}>
+                              <code className="key-code key-code-wrap" style={{ fontSize: '0.8rem' }}>
                                 {String(item.raw_value ?? '—')}
                               </code>
                             </td>
@@ -618,7 +584,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                                     color: currentDecision === 'EXCLUDE' ? '#ffffff' : undefined,
                                   }}
                                   onClick={() => handleActionToggle(item.source_row_index, 'EXCLUDE')}
-                                  title="Omit this row from reconciliation execution"
+                                  title="Leave this row out when comparing records"
                                 >
                                   {currentDecision === 'EXCLUDE' && <Check size={12} />} Exclude
                                 </button>
@@ -634,7 +600,7 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
                                     color: currentDecision === 'ACCEPT_AS_VALID' ? '#ffffff' : undefined,
                                   }}
                                   onClick={() => handleActionToggle(item.source_row_index, 'ACCEPT_AS_VALID')}
-                                  title="Include row in reconciliation run despite anomaly"
+                                  title="Include this row when comparing records"
                                 >
                                   {currentDecision === 'ACCEPT_AS_VALID' && <Check size={12} />} Accept
                                 </button>
@@ -652,18 +618,9 @@ export const ProfilingQuarantineDrawer: React.FC<ProfilingQuarantineDrawerProps>
         </div>
 
         {/* Footer */}
-        <div
-          style={{
-            padding: '14px 24px',
-            borderTop: '1px solid var(--border-color)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            backgroundColor: 'var(--bg-secondary)',
-          }}
-        >
-          <span className="text-dim" style={{ fontSize: '0.8rem' }}>
-            Raw files are strictly immutable. Pre-flight resolutions are persisted to isolation sidecars.
+        <div className="drawer-footer">
+          <span className="text-dim drawer-footer-note">
+            Original spreadsheets are never modified. Your review decisions are saved securely.
           </span>
           <button type="button" className="btn btn-secondary" onClick={onClose}>
             Close

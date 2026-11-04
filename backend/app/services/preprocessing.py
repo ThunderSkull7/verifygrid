@@ -20,6 +20,7 @@ from app.models.source_file import SourceFile
 from app.models.user import User
 from app.schemas.preprocessing import (
     ColumnMetadata,
+    HeaderRowCandidate,
     PreprocessingConfig,
     PreprocessingResultResponse,
     ValidationIssue,
@@ -41,13 +42,105 @@ def _safe_relative_filename(path_str: str) -> str:
     return Path(path_str).name
 
 
-def read_csv_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple[int, List[Any]]], List[ValidationIssue]]:
+class DatasetExtractionResult(tuple):
+    """Extended tuple returned by extract_dataset_records for backward-compatible unpacking."""
+
+    def __new__(cls, values, detected_header_row=None, header_row_candidates=None):
+        instance = super().__new__(cls, values)
+        instance.detected_header_row = detected_header_row
+        instance.header_row_candidates = header_row_candidates
+        return instance
+
+
+def analyze_header_candidates(
+    sample_rows: List[Tuple[int, List[Any]]],
+    explicit_header_row: Optional[int] = None,
+) -> Tuple[Optional[int], List[str], List[HeaderRowCandidate], bool]:
     """
-    Safely parse CSV file with encoding fallback and dialect detection.
+    Examines initial rows of a spreadsheet or CSV to identify candidate header rows,
+    differentiating likely title/metadata banner rows from table column headers (Batch 7).
+
     Returns:
-        - raw_headers: List of header strings from first row
-        - data_rows: List of (1-based source_row_num, [cell_values])
-        - issues: List of parsing warnings or errors
+        (chosen_row_number, raw_headers, candidates_list, is_auto_detected)
+    """
+    non_empty_candidates: List[Tuple[int, List[Any], List[Any]]] = []
+    for r_num, row_cells in sample_rows:
+        clean = list(row_cells)
+        while clean and (clean[-1] is None or not str(clean[-1]).strip()):
+            clean.pop()
+        ne = [c for c in clean if c is not None and str(c).strip() != ""]
+        if ne:
+            non_empty_candidates.append((r_num, clean, ne))
+
+    if not non_empty_candidates:
+        return None, [], [], False
+
+    # If explicit header row is requested by user/config:
+    if explicit_header_row is not None:
+        target_cand = next((c for c in non_empty_candidates if c[0] == explicit_header_row), None)
+        if target_cand is not None:
+            chosen_rnum, chosen_clean, _ = target_cand
+            headers = ["" if c is None else str(c) for c in chosen_clean]
+        else:
+            chosen_rnum = explicit_header_row
+            headers = []
+        candidates = [
+            HeaderRowCandidate(
+                row_number=r,
+                columns=[str(c) for c in ne],
+                sample_preview=[str(c)[:30] for c in ne[:5]],
+                is_likely_header=(r == explicit_header_row),
+            )
+            for r, _, ne in non_empty_candidates[:5]
+        ]
+        return chosen_rnum, headers, candidates, False
+
+    # Automatic header detection: examine widths of candidate rows
+    widths = [len(ne) for _, _, ne in non_empty_candidates]
+    max_width = max(widths[:10]) if widths else 0
+
+    idx = 0
+    while idx < len(non_empty_candidates) - 1:
+        cur_rnum, cur_clean, cur_ne = non_empty_candidates[idx]
+        cur_w = len(cur_ne)
+        # Title banner heuristic: 1-2 non-empty cells when the following table is at least 3 columns
+        # wide (and at least 2 columns wider than the banner row).
+        is_title_banner = (cur_w <= 2 and max_width >= 3 and max_width >= cur_w + 2)
+        if is_title_banner:
+            idx += 1
+            continue
+        break
+
+    chosen_rnum, chosen_clean, _ = non_empty_candidates[idx]
+    headers = ["" if c is None else str(c) for c in chosen_clean]
+    candidates = [
+        HeaderRowCandidate(
+            row_number=r,
+            columns=[str(c) for c in ne],
+            sample_preview=[str(c)[:30] for c in ne[:5]],
+            is_likely_header=(r == chosen_rnum),
+        )
+        for r, _, ne in non_empty_candidates[:5]
+    ]
+    is_auto_detected = (chosen_rnum != non_empty_candidates[0][0])
+    return chosen_rnum, headers, candidates, is_auto_detected
+
+
+def read_csv_rows(
+    file_path: Path,
+    max_rows: int,
+    header_row: Optional[int] = None,
+    return_header_info: bool = False,
+) -> Any:
+    """
+    Safely parse CSV file with encoding fallback, dialect detection, and intelligent
+    header-row detection (Batch 7).
+
+    Returns:
+        If return_header_info is False:
+            (raw_headers, data_rows, issues)
+        If return_header_info is True:
+            (raw_headers, data_rows, issues, detected_header_row, candidates)
     """
     issues: List[ValidationIssue] = []
     
@@ -61,6 +154,8 @@ def read_csv_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple
                 message="Uploaded file is empty (0 bytes).",
             )
         )
+        if return_header_info:
+            return [], [], issues, None, []
         return [], [], issues
 
     # Read binary and try encodings
@@ -81,6 +176,8 @@ def read_csv_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple
                 message="Unable to decode file. Supported encodings are UTF-8, CP1252, and Latin-1.",
             )
         )
+        if return_header_info:
+            return [], [], issues, None, []
         return [], [], issues
 
     if not content.strip():
@@ -91,6 +188,8 @@ def read_csv_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple
                 message="Uploaded file contains only blank whitespace.",
             )
         )
+        if return_header_info:
+            return [], [], issues, None, []
         return [], [], issues
 
     # Sniff delimiter safely
@@ -106,34 +205,20 @@ def read_csv_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple
     stream = io.StringIO(content)
     reader = csv.reader(stream, delimiter=delimiter, skipinitialspace=True)
 
-    raw_headers: List[str] = []
-    data_rows: List[Tuple[int, List[Any]]] = []
+    buffered_rows: List[Tuple[int, List[Any]]] = []
     current_source_row = 0
-    header_found = False
 
     for row in reader:
         current_source_row += 1
-
-        if not header_found:
-            # First row with content is treated as the header
-            if any(cell.strip() for cell in row):
-                raw_headers = row
-                header_found = True
-            continue
-
-        data_rows.append((current_source_row, row))
-        if len(data_rows) >= max_rows:
-            issues.append(
-                ValidationIssue(
-                    level="warning",
-                    issue_type="row_limit_reached",
-                    message=f"File exceeds maximum row limit of {max_rows}. Processing truncated.",
-                    row_number=current_source_row,
-                )
-            )
+        buffered_rows.append((current_source_row, row))
+        if len(buffered_rows) >= 30:
             break
 
-    if not header_found or not raw_headers:
+    chosen_rnum, detected_headers, candidates, is_auto = analyze_header_candidates(
+        buffered_rows, explicit_header_row=header_row
+    )
+
+    if chosen_rnum is None or not detected_headers:
         issues.append(
             ValidationIssue(
                 level="error",
@@ -141,7 +226,67 @@ def read_csv_rows(file_path: Path, max_rows: int) -> Tuple[List[str], List[Tuple
                 message="File does not contain any header row.",
             )
         )
+        if return_header_info:
+            return [], [], issues, None, []
+        return [], [], issues
 
+    raw_headers = detected_headers
+    data_rows: List[Tuple[int, List[Any]]] = []
+
+    if is_auto:
+        issues.append(
+            ValidationIssue(
+                level="info",
+                issue_type="header_row_detected",
+                message=(
+                    f"Row {chosen_rnum} was automatically detected as the table header row. "
+                    f"Columns: {raw_headers}."
+                ),
+                row_number=chosen_rnum,
+            )
+        )
+    elif header_row is not None:
+        issues.append(
+            ValidationIssue(
+                level="info",
+                issue_type="explicit_header_row",
+                message=f"Row {chosen_rnum} was used as the table header row per configuration.",
+                row_number=chosen_rnum,
+            )
+        )
+
+    for r_num, row_list in buffered_rows:
+        if r_num <= chosen_rnum:
+            continue
+        data_rows.append((r_num, row_list))
+        if len(data_rows) >= max_rows:
+            issues.append(
+                ValidationIssue(
+                    level="warning",
+                    issue_type="row_limit_reached",
+                    message=f"File exceeds maximum row limit of {max_rows}. Processing truncated.",
+                    row_number=r_num,
+                )
+            )
+            break
+
+    if len(data_rows) < max_rows:
+        for row in reader:
+            current_source_row += 1
+            data_rows.append((current_source_row, row))
+            if len(data_rows) >= max_rows:
+                issues.append(
+                    ValidationIssue(
+                        level="warning",
+                        issue_type="row_limit_reached",
+                        message=f"File exceeds maximum row limit of {max_rows}. Processing truncated.",
+                        row_number=current_source_row,
+                    )
+                )
+                break
+
+    if return_header_info:
+        return raw_headers, data_rows, issues, chosen_rnum, candidates
     return raw_headers, data_rows, issues
 
 
@@ -184,9 +329,12 @@ def read_xlsx_rows(
     file_path: Path,
     max_rows: int,
     sheet_name: Optional[str] = None,
-) -> Tuple[List[str], List[Tuple[int, List[Any]]], List[ValidationIssue]]:
+    header_row: Optional[int] = None,
+    return_header_info: bool = False,
+) -> Any:
     """
-    Safely parse an XLSX file using openpyxl in read_only mode.
+    Safely parse an XLSX file using openpyxl in read_only mode with intelligent
+    header-row detection (Batch 7).
 
     Batch 7: when sheet_name is provided, the EXACT named worksheet is parsed
     (never a fallback); an unknown name yields an actionable worksheet_not_found
@@ -194,9 +342,10 @@ def read_xlsx_rows(
     active sheet is used.
 
     Returns:
-        - raw_headers: List of header strings from first row
-        - data_rows: List of (1-based source_row_num, [cell_values])
-        - issues: List of parsing warnings or errors
+        If return_header_info is False:
+            (raw_headers, data_rows, issues)
+        If return_header_info is True:
+            (raw_headers, data_rows, issues, detected_header_row, candidates)
     """
     issues: List[ValidationIssue] = []
 
@@ -210,6 +359,8 @@ def read_xlsx_rows(
                 message="Unable to read XLSX spreadsheet. The file may be corrupt or encrypted.",
             )
         )
+        if return_header_info:
+            return [], [], issues, None, []
         return [], [], issues
 
     try:
@@ -226,6 +377,8 @@ def read_xlsx_rows(
                         ),
                     )
                 )
+                if return_header_info:
+                    return [], [], issues, None, []
                 return [], [], issues
             sheet = workbook[sheet_name]
         else:
@@ -238,40 +391,25 @@ def read_xlsx_rows(
                     message="Spreadsheet contains no active worksheet.",
                 )
             )
+            if return_header_info:
+                return [], [], issues, None, []
             return [], [], issues
 
-        raw_headers: List[str] = []
-        data_rows: List[Tuple[int, List[Any]]] = []
-        header_found = False
+        buffered_rows: List[Tuple[int, List[Any]]] = []
         current_source_row = 0
+        row_iter = sheet.iter_rows(values_only=True)
 
-        for row in sheet.iter_rows(values_only=True):
+        for row in row_iter:
             current_source_row += 1
-            row_list = list(row)
-
-            # Skip trailing empty cells
-            if not header_found:
-                if any(c is not None and str(c).strip() for c in row_list):
-                    # Trim right-side empty header cells
-                    while row_list and (row_list[-1] is None or not str(row_list[-1]).strip()):
-                        row_list.pop()
-                    raw_headers = ["" if c is None else str(c) for c in row_list]
-                    header_found = True
-                continue
-
-            data_rows.append((current_source_row, row_list))
-            if len(data_rows) >= max_rows:
-                issues.append(
-                    ValidationIssue(
-                        level="warning",
-                        issue_type="row_limit_reached",
-                        message=f"Spreadsheet exceeds maximum row limit of {max_rows}. Processing truncated.",
-                        row_number=current_source_row,
-                    )
-                )
+            buffered_rows.append((current_source_row, list(row)))
+            if len(buffered_rows) >= 30:
                 break
 
-        if not header_found or not raw_headers:
+        chosen_rnum, detected_headers, candidates, is_auto = analyze_header_candidates(
+            buffered_rows, explicit_header_row=header_row
+        )
+
+        if chosen_rnum is None or not detected_headers:
             issues.append(
                 ValidationIssue(
                     level="error",
@@ -279,7 +417,67 @@ def read_xlsx_rows(
                     message="Spreadsheet does not contain a header row.",
                 )
             )
+            if return_header_info:
+                return [], [], issues, None, []
+            return [], [], issues
 
+        raw_headers = detected_headers
+        data_rows: List[Tuple[int, List[Any]]] = []
+
+        if is_auto:
+            issues.append(
+                ValidationIssue(
+                    level="info",
+                    issue_type="header_row_detected",
+                    message=(
+                        f"Row {chosen_rnum} was automatically detected as the table header row. "
+                        f"Columns: {raw_headers}."
+                    ),
+                    row_number=chosen_rnum,
+                )
+            )
+        elif header_row is not None:
+            issues.append(
+                ValidationIssue(
+                    level="info",
+                    issue_type="explicit_header_row",
+                    message=f"Row {chosen_rnum} was used as the table header row per configuration.",
+                    row_number=chosen_rnum,
+                )
+            )
+
+        for r_num, row_list in buffered_rows:
+            if r_num <= chosen_rnum:
+                continue
+            data_rows.append((r_num, row_list))
+            if len(data_rows) >= max_rows:
+                issues.append(
+                    ValidationIssue(
+                        level="warning",
+                        issue_type="row_limit_reached",
+                        message=f"Spreadsheet exceeds maximum row limit of {max_rows}. Processing truncated.",
+                        row_number=r_num,
+                    )
+                )
+                break
+
+        if len(data_rows) < max_rows:
+            for row in row_iter:
+                current_source_row += 1
+                data_rows.append((current_source_row, list(row)))
+                if len(data_rows) >= max_rows:
+                    issues.append(
+                        ValidationIssue(
+                            level="warning",
+                            issue_type="row_limit_reached",
+                            message=f"Spreadsheet exceeds maximum row limit of {max_rows}. Processing truncated.",
+                            row_number=current_source_row,
+                        )
+                    )
+                    break
+
+        if return_header_info:
+            return raw_headers, data_rows, issues, chosen_rnum, candidates
         return raw_headers, data_rows, issues
 
     finally:
@@ -310,13 +508,19 @@ def extract_dataset_records(
     identifier_names = {name.strip().lower() for name in config.identifier_columns}
 
     # 1. Read rows according to file type
+    detected_hdr_row: Optional[int] = None
+    hdr_candidates: Optional[List[HeaderRowCandidate]] = None
     if file_type == "csv":
-        raw_headers, data_rows, issues = read_csv_rows(file_path, config.max_rows)
+        raw_headers, data_rows, issues, detected_hdr_row, hdr_candidates = read_csv_rows(
+            file_path, config.max_rows, header_row=config.header_row, return_header_info=True
+        )
     elif file_type == "xlsx":
         # Batch 7: explicit sheet_name argument takes precedence over the config
         # value; both are exact-name selections (no implicit fallback either way).
         effective_sheet = sheet_name if sheet_name is not None else config.selected_worksheet
-        raw_headers, data_rows, issues = read_xlsx_rows(file_path, config.max_rows, sheet_name=effective_sheet)
+        raw_headers, data_rows, issues, detected_hdr_row, hdr_candidates = read_xlsx_rows(
+            file_path, config.max_rows, sheet_name=effective_sheet, header_row=config.header_row, return_header_info=True
+        )
     else:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -326,7 +530,11 @@ def extract_dataset_records(
     # If fatal error reading headers or file
     has_fatal_error = any(issue.level == "error" for issue in issues)
     if has_fatal_error or not raw_headers:
-        return [], [], {}, [], [], issues, 0
+        return DatasetExtractionResult(
+            ([], [], {}, [], [], issues, 0),
+            detected_header_row=detected_hdr_row,
+            header_row_candidates=hdr_candidates,
+        )
 
     if config.strip_whitespace:
         raw_headers = [str(clean_whitespace(h)) for h in raw_headers]
@@ -540,15 +748,19 @@ def extract_dataset_records(
             )
         )
 
-    total_source_rows = len(data_rows) + 1  # data rows + header
-    return (
-        processed_records,
-        columns_metadata,
-        column_mapping,
-        duplicate_record_row_numbers,
-        empty_row_numbers,
-        issues,
-        total_source_rows,
+    total_source_rows = len(data_rows) + (detected_hdr_row or 1)
+    return DatasetExtractionResult(
+        (
+            processed_records,
+            columns_metadata,
+            column_mapping,
+            duplicate_record_row_numbers,
+            empty_row_numbers,
+            issues,
+            total_source_rows,
+        ),
+        detected_header_row=detected_hdr_row,
+        header_row_candidates=hdr_candidates,
     )
 
 
@@ -556,7 +768,7 @@ def preprocess_file_data(
     file_path: Path,
     file_type: str,
     config: Optional[PreprocessingConfig] = None,
-) -> Tuple[List[ColumnMetadata], Dict[str, str], List[Dict[str, Any]], List[List[int]], List[int], List[ValidationIssue], int, int]:
+) -> Tuple[List[ColumnMetadata], Dict[str, str], List[Dict[str, Any]], List[List[int]], List[int], List[ValidationIssue], int, int, Optional[int], Optional[List[HeaderRowCandidate]]]:
     """
     Core parsing, cleaning, and normalization logic returning preview rows.
     Returns:
@@ -568,7 +780,10 @@ def preprocess_file_data(
         - issues: List[ValidationIssue]
         - total_source_rows: int
         - data_rows_count: int
+        - detected_header_row: Optional[int]
+        - header_row_candidates: Optional[List[HeaderRowCandidate]]
     """
+    res = extract_dataset_records(file_path=file_path, file_type=file_type, config=config)
     (
         processed_records,
         columns_metadata,
@@ -577,7 +792,7 @@ def preprocess_file_data(
         empty_row_numbers,
         issues,
         total_source_rows,
-    ) = extract_dataset_records(file_path=file_path, file_type=file_type, config=config)
+    ) = res
 
     # Preview rows (first 10 records with source_row_number)
     normalized_preview = [
@@ -593,6 +808,8 @@ def preprocess_file_data(
         issues,
         total_source_rows,
         len(processed_records),
+        getattr(res, "detected_header_row", None),
+        getattr(res, "header_row_candidates", None),
     )
 
 
@@ -661,6 +878,8 @@ def preprocess_source_file(
         issues,
         total_source_rows,
         data_rows_count,
+        detected_header_row,
+        header_row_candidates,
     ) = preprocess_file_data(
         file_path=resolved_path,
         file_type=source_file.file_type,
@@ -709,4 +928,6 @@ def preprocess_source_file(
             if source_file.file_type == "xlsx"
             else None
         ),
+        detected_header_row=detected_header_row,
+        header_row_candidates=header_row_candidates,
     )

@@ -14,16 +14,36 @@ import type { ColumnMappingEntry, FileColumnMappings, UploadedDataset } from '..
 /** Small, explicit synonym dictionary. Keys are canonical attribute names; values are
  *  additional normalized column names that may denote the same attribute. Matches via
  *  this dictionary always require user confirmation — they are never auto-applied. */
-export const COLUMN_SYNONYMS: Record<string, string[]> = {
-  student_id: ['student_number', 'studentno', 'studentid'],
-  enrollment_number: ['enrolment_number', 'enrollment_no', 'enrolment_no', 'enrol_no', 'enrolment', 'enrollment', 'enrol'],
-  student_name: ['full_name', 'name_of_student'],
-  course: ['course_name', 'program', 'programme', 'course_title'],
-  batch_year: ['batch', 'batchyear', 'year'],
-  hostel_name: ['hostel'],
-  block: ['hostel_block', 'block_name'],
-  room_number: ['room', 'room_no', 'roomno'],
-};
+const SYNONYM_CLUSTERS: string[][] = [
+  ['student_id', 'student_number', 'studentno', 'studentid', 'roll_no', 'rollno', 'reg_no', 'registration_no', 'enrollment_no', 'enrolment_no', 'enrol_no', 'enrolment', 'enrollment', 'enrol', 'matric_no', 'id'],
+  ['student_name', 'full_name', 'name_of_student', 'name', 'first_name', 'candidate_name'],
+  ['date_of_birth', 'dob', 'birth_date', 'birthdate'],
+  ['department', 'course', 'course_name', 'program', 'programme', 'course_title', 'dept', 'branch', 'discipline'],
+  ['blood_group', 'blood_type', 'bloodgroup', 'bg'],
+  ['phone_number', 'phone', 'mobile', 'contact_no', 'contact', 'cell'],
+  ['email_address', 'email', 'mail_id', 'email_id'],
+  ['batch_year', 'batch', 'batchyear', 'year'],
+  ['hostel_name', 'hostel'],
+  ['block', 'hostel_block', 'block_name'],
+  ['room_number', 'room', 'room_no', 'roomno'],
+  ['gender', 'sex'],
+  ['address', 'residential_address', 'permanent_address', 'addr'],
+];
+
+/** Explicit synonym dictionary generated from semantic clusters. Keys are canonical
+ *  attribute names; values are additional normalized column names that denote the same attribute.
+ *  Matches via this dictionary always require user confirmation — they are never auto-applied. */
+export const COLUMN_SYNONYMS: Record<string, string[]> = {};
+SYNONYM_CLUSTERS.forEach((cluster) => {
+  cluster.forEach((term) => {
+    const others = cluster.filter((t) => t !== term);
+    if (!COLUMN_SYNONYMS[term]) {
+      COLUMN_SYNONYMS[term] = [...others];
+    } else {
+      COLUMN_SYNONYMS[term] = Array.from(new Set([...COLUMN_SYNONYMS[term], ...others]));
+    }
+  });
+});
 
 /** Normalize a column name the same way the backend's normalize_column_name does
  *  (lower snake case, non-alphanumerics collapsed to underscores). */
@@ -69,9 +89,21 @@ export const suggestMappingsForFile = (
       return;
     }
     const synonyms = COLUMN_SYNONYMS[attr] || [];
-    const synonymMatch = dataset.profile?.columns.find((col) =>
-      synonyms.includes(normalizeColumn(col.normalized_name)),
-    );
+    let synonymMatch: any = null;
+    for (const syn of synonyms) {
+      const match = dataset.profile?.columns.find((col) => {
+        if (normalizeColumn(col.normalized_name) !== syn) return false;
+        const colType = col.detected_type?.toLowerCase();
+        // Guard against incompatible data types (e.g. date vs numeric amount)
+        if (colType === 'date' && (attr.includes('amount') || attr.includes('fee') || attr.includes('price') || attr.includes('balance'))) return false;
+        if (colType === 'number' && (attr.includes('date') || attr.includes('dob') || attr.includes('birth'))) return false;
+        return true;
+      });
+      if (match) {
+        synonymMatch = match;
+        break;
+      }
+    }
     if (synonymMatch) {
       result[attr] = { column: synonymMatch.normalized_name, state: 'needs_confirmation' };
     }
@@ -174,15 +206,44 @@ export const buildFieldOwnershipPayload = (
   aliasFor: (fileId: string) => string,
 ): Record<string, string> | undefined => {
   const keys = new Set(unifiedKeys.map((k) => k.trim()).filter(Boolean));
+  const comparedAttrs = computeComparedAttributesMultiPrimary(datasets, mappings, unifiedKeys);
   const out: Record<string, string> = {};
-  Object.entries(fieldOwners).forEach(([attr, fileId]) => {
+
+  comparedAttrs.forEach((attr) => {
     if (!attr || keys.has(attr)) return;
-    const ds = datasets.find((d) => d.id === fileId);
-    if (!ds) return;
-    const entry = mappings[ds.id]?.[attr];
-    if (!entry?.column || (entry.state !== 'confirmed' && entry.state !== 'suggested')) return;
-    out[attr] = aliasFor(ds.id);
+    const explicitFileId = fieldOwners[attr];
+    let ownerDs = explicitFileId ? datasets.find((d) => d.id === explicitFileId) : null;
+
+    // Check if the explicitly selected dataset actually carries this attribute
+    if (ownerDs) {
+      const entry = mappings[ownerDs.id]?.[attr];
+      if (!entry?.column || (entry.state !== 'confirmed' && entry.state !== 'suggested')) {
+        ownerDs = null;
+      }
+    }
+
+    // If no explicit valid owner, find the primary dataset that carries this attribute
+    if (!ownerDs) {
+      ownerDs =
+        datasets.find(
+          (d) =>
+            d.isPrimary &&
+            Boolean(mappings[d.id]?.[attr]?.column) &&
+            (mappings[d.id]?.[attr]?.state === 'confirmed' || mappings[d.id]?.[attr]?.state === 'suggested'),
+        ) ||
+        datasets.find(
+          (d) =>
+            Boolean(mappings[d.id]?.[attr]?.column) &&
+            (mappings[d.id]?.[attr]?.state === 'confirmed' || mappings[d.id]?.[attr]?.state === 'suggested'),
+        ) ||
+        null;
+    }
+
+    if (ownerDs) {
+      out[attr] = aliasFor(ownerDs.id);
+    }
   });
+
   return Object.keys(out).length > 0 ? out : undefined;
 };
 

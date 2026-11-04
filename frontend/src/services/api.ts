@@ -109,8 +109,10 @@ class ApiClient {
 
     if (!response.ok) {
       let errorMessage = `HTTP ${response.status} ${response.statusText}`;
+      let errorData: any = null;
       try {
         const errorJson = await response.json();
+        errorData = errorJson;
         if (errorJson.detail) {
           if (typeof errorJson.detail === 'string') {
             errorMessage = errorJson.detail;
@@ -119,12 +121,18 @@ class ApiClient {
             errorMessage = errorJson.detail
               .map((d: any) => `${d.loc?.join('.')} : ${d.msg}`)
               .join(', ');
+          } else if (typeof errorJson.detail === 'object' && errorJson.detail !== null) {
+            errorMessage = errorJson.detail.message || errorMessage;
           }
         }
       } catch {
         // Response was not JSON
       }
-      throw new Error(errorMessage);
+      const err: any = new Error(errorMessage);
+      err.status = response.status;
+      err.detail = errorData?.detail;
+      err.data = errorData;
+      throw err;
     }
 
     // Check for empty body / 204

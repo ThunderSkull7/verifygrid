@@ -191,12 +191,18 @@ def _read_file_columns(
     path: Path,
     file_type: str,
     sheet_name: Optional[str],
+    header_row: Optional[int] = None,
 ) -> Tuple[List[str], Dict[str, str], List[ValidationIssue]]:
     """Parse a file's headers/columns for validation (no verification runs)."""
     issues: List[ValidationIssue] = []
     cfg = PreprocessingConfig()
+    update_dict = {}
     if sheet_name is not None:
-        cfg = cfg.model_copy(update={"selected_worksheet": sheet_name})
+        update_dict["selected_worksheet"] = sheet_name
+    if header_row is not None:
+        update_dict["header_row"] = header_row
+    if update_dict:
+        cfg = cfg.model_copy(update=update_dict)
     _, cols_meta, mapping, _, _, parse_issues, _ = extract_dataset_records(path, file_type, cfg)
     fatal = [i for i in parse_issues if getattr(i, "level", None) == "error"]
     for i in fatal:
@@ -324,7 +330,7 @@ def apply_template(
                 continue
 
         cols, _, parse_issues = _read_file_columns(
-            path_resolved, source_file.file_type, slot_def.sheet_name
+            path_resolved, source_file.file_type, slot_def.sheet_name, getattr(slot_def, "header_row", None)
         )
         issues.extend(ValidationIssue(slot=slot_def.alias, message=i.message) for i in parse_issues)
         slot_columns[slot_def.alias] = cols
@@ -373,6 +379,7 @@ def apply_template(
             key_columns=s.key_columns,
             field_mapping=dict(s.field_mapping),
             sheet_name=s.sheet_name,
+            header_row=getattr(s, "header_row", None),
         )
         for s in config.sources
     ]

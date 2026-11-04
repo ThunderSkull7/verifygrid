@@ -20,7 +20,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onClose,
   showClose = false,
 }) => {
-  const brandSubtitle = currentTab === 'financial' ? 'Financial Auditing' : 'Data Reconciliation';
+  const brandSubtitle = currentTab === 'financial' ? 'Financial Auditing' : 'Compare Records';
   const { user, logout } = useAuth();
 
   const getInitials = (name?: string | null, email?: string) => {
@@ -76,7 +76,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           aria-current={currentTab === 'verify' ? 'page' : undefined}
         >
           <Building2 size={18} />
-          <span>Organization Verification</span>
+          <span>Organization Records</span>
         </button>
         <button
           type="button"

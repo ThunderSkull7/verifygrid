@@ -10,7 +10,9 @@ import { test } from 'node:test';
 
 import {
   buildAllSuggestions,
+  buildFieldOwnershipPayload,
   collectCanonicalAttributes,
+  COLUMN_SYNONYMS,
   computeComparedAttributes,
   computeComparedAttributesMultiPrimary,
   normalizeColumn,
@@ -155,4 +157,51 @@ test('buildAllSuggestions fills only files that have no mapping state yet', () =
   const result = buildAllSuggestions([academic, library], ['student_id'], existing);
   assert.equal(result.academic, existing.academic);
   assert.deepEqual(result.library.name, { column: 'name', state: 'suggested' });
+});
+
+test('buildFieldOwnershipPayload resolves primary carrying sources for all compared attributes', () => {
+  const academic = dataset('file-academic', ['student_id', 'gpa', 'degree'], true);
+  const hostel = dataset('file-hostel', ['student_id', 'room_no', 'block'], true);
+  const idcard = dataset('file-idcard', ['student_id', 'gpa', 'room_no'], false);
+
+  const mappings: Record<string, FileColumnMappings> = {
+    'file-academic': {
+      gpa: { column: 'gpa', state: 'suggested' },
+      degree: { column: 'degree', state: 'suggested' },
+    },
+    'file-hostel': {
+      room_no: { column: 'room_no', state: 'suggested' },
+      block: { column: 'block', state: 'suggested' },
+    },
+    'file-idcard': {
+      gpa: { column: 'gpa', state: 'suggested' },
+      room_no: { column: 'room_no', state: 'suggested' },
+    },
+  };
+
+  // User did not manually set fieldOwners in UI state: empty dict
+  const fieldOwners: Record<string, string> = {};
+  const aliasFor = (id: string) => id.replace('file-', '');
+
+  const payload = buildFieldOwnershipPayload(
+    [academic, hostel, idcard],
+    mappings,
+    fieldOwners,
+    ['student_id'],
+    aliasFor,
+  );
+
+  assert.ok(payload);
+  // Academic carries gpa and is primary -> owner of gpa
+  assert.equal(payload.gpa, 'academic');
+  // Hostel carries room_no and is primary -> owner of room_no
+  assert.equal(payload.room_no, 'hostel');
+});
+
+test('COLUMN_SYNONYMS supports bidirectional college attributes', () => {
+  assert.ok(COLUMN_SYNONYMS.date_of_birth.includes('dob'));
+  assert.ok(COLUMN_SYNONYMS.dob.includes('date_of_birth'));
+  assert.ok(COLUMN_SYNONYMS.department.includes('course'));
+  assert.ok(COLUMN_SYNONYMS.course.includes('department'));
+  assert.ok(COLUMN_SYNONYMS.blood_group.includes('blood_type'));
 });

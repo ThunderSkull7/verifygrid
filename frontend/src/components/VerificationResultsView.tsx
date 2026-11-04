@@ -31,6 +31,8 @@ interface VerificationResultsViewProps {
   projectId: string;
   response: VerificationResponse;
   run?: VerificationRun;
+  mode?: 'organization' | 'financial';
+  fileLabels?: Record<string, string>;
 }
 
 const PAGE_SIZE = 100;
@@ -39,7 +41,17 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
   projectId,
   response,
   run,
+  mode = 'organization',
+  fileLabels,
 }) => {
+  const isOrgMode = mode !== 'financial';
+
+  const formatKeyValues = useCallback((kv: Record<string, unknown> | null | undefined): string => {
+    if (!kv || typeof kv !== 'object') return '—';
+    const entries = Object.entries(kv);
+    if (entries.length === 0) return '—';
+    return entries.map(([k, v]) => `${k}: ${String(v)}`).join(' · ');
+  }, []);
   // View mode: Record-by-record Grid vs Grouped Exception Clusters
   const [viewMode, setViewMode] = useState<'records' | 'clusters'>('records');
 
@@ -138,8 +150,10 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
         if (item.assigned_to) return false;
       }
       if (searchKey.trim()) {
+        const query = searchKey.toLowerCase();
         const keyString = JSON.stringify(item.key_values).toLowerCase();
-        if (!keyString.includes(searchKey.toLowerCase())) {
+        const formattedKey = formatKeyValues(item.key_values).toLowerCase();
+        if (!keyString.includes(query) && !formattedKey.includes(query)) {
           return false;
         }
       }
@@ -178,6 +192,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
     minAmountFilter,
     maxAmountFilter,
     sortOption,
+    formatKeyValues,
   ]);
 
   const visibleResults = filteredResults.slice(0, visibleCount);
@@ -202,9 +217,12 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
     setSortOption('exposure_desc');
   };
 
+  const hasEvaluatedFields = (summary.attribute_comparisons_completed ?? 1) > 0;
   const isZeroExceptions =
-    summary.total_discrepancies === 0 ||
-    ((summary.gross_exposure ?? 0) === 0 && summary.field_mismatches === 0 && summary.unmatched_source_records === 0);
+    hasEvaluatedFields &&
+    (summary.total_discrepancies === 0 ||
+      ((summary.gross_exposure ?? 0) === 0 && summary.field_mismatches === 0 && summary.unmatched_source_records === 0));
+  const isUntestedFields = !hasEvaluatedFields && (summary.matched_records ?? 0) > 0;
 
   // Row selection handlers
   const handleToggleRow = (id: string, e: React.MouseEvent) => {
@@ -252,17 +270,19 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
 
   return (
     <div>
-      {/* Financial Materiality Header */}
+      {/* Verification Header */}
       <div className="card" style={{ marginBottom: 20 }}>
         <div className="card-header" style={{ marginBottom: 18 }}>
           <div>
             <h2 className="card-title">
-              <CheckCircle2 size={20} /> Financial Materiality &amp; Reconciliation Summary
+              {isOrgMode ? <ShieldCheck size={20} className="text-accent" /> : <CheckCircle2 size={20} />}
+              {' '}
+              {isOrgMode ? 'Verification Results & Summary' : 'Financial Materiality & Reconciliation Summary'}
             </h2>
             <p className="card-description">
-              {summary.total_source_records.toLocaleString()} source records compared against{' '}
-              {summary.total_target_records.toLocaleString()} target records
-              {run ? ` — run saved to audit history.` : '.'}
+              {isOrgMode
+                ? `${summary.total_source_records.toLocaleString()} records evaluated across source files${run ? ' — run saved to audit history.' : '.'}`
+                : `${summary.total_source_records.toLocaleString()} source records compared against ${summary.total_target_records.toLocaleString()} target records${run ? ' — run saved to audit history.' : '.'}`}
             </p>
           </div>
           <div className="row-wrap">
@@ -305,149 +325,293 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
           </div>
         </div>
 
-        {/* 4 Financial KPI Cards */}
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
-            gap: 14,
-            marginBottom: 20,
-          }}
-        >
-          {/* 1. Gross Exception Exposure */}
+        {/* Mode-Aware KPI Cards */}
+        {isOrgMode ? (
           <div
-            className="stat-card"
             style={{
-              padding: '16px 18px',
-              backgroundColor: 'var(--bg-card-hover)',
-              borderRadius: 'var(--radius-md)',
-              border: (summary.gross_exposure ?? 0) > 0 ? '1px solid var(--danger-border, #f87171)' : '1px solid var(--border-color)',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+              gap: 14,
+              marginBottom: 20,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
-                Gross Exposure
-              </span>
-              <DollarSign size={16} className={(summary.gross_exposure ?? 0) > 0 ? 'text-danger' : 'text-dim'} />
-            </div>
+            {/* 1. Total Records Checked */}
             <div
+              className="stat-card"
               style={{
-                fontSize: '1.45rem',
-                fontWeight: 700,
-                fontFamily: 'var(--font-mono)',
-                color: (summary.gross_exposure ?? 0) > 0 ? 'var(--danger-text, #ef4444)' : 'var(--text-main)',
+                padding: '16px 18px',
+                backgroundColor: 'var(--bg-card-hover)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-color)',
               }}
             >
-              {currencySymbol}
-              {(summary.gross_exposure ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                  Total Records
+                </span>
+                <TableProperties size={16} className="text-accent" />
+              </div>
+              <div
+                style={{
+                  fontSize: '1.45rem',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-main)',
+                }}
+              >
+                {summary.total_source_records.toLocaleString()}
+              </div>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                Records evaluated across files
+              </span>
             </div>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
-              Absolute monetary variance (|src - tgt|)
-            </span>
-          </div>
 
-          {/* 2. Net Variance */}
-          <div
-            className="stat-card"
-            style={{
-              padding: '16px 18px',
-              backgroundColor: 'var(--bg-card-hover)',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border-color)',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
-                Net Variance
-              </span>
-              <Info size={16} className="text-dim" />
-            </div>
+            {/* 2. Clean Matches */}
             <div
+              className="stat-card"
               style={{
-                fontSize: '1.45rem',
-                fontWeight: 700,
-                fontFamily: 'var(--font-mono)',
-                color:
-                  (summary.net_variance ?? 0) > 0
-                    ? 'var(--warning-text, #f59e0b)'
-                    : (summary.net_variance ?? 0) < 0
-                    ? 'var(--danger-text, #ef4444)'
-                    : 'var(--text-main)',
+                padding: '16px 18px',
+                backgroundColor: 'var(--bg-card-hover)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-color)',
               }}
             >
-              {(summary.net_variance ?? 0) >= 0 ? '+' : ''}
-              {currencySymbol}
-              {(summary.net_variance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                  Clean Matches
+                </span>
+                <CheckCircle2 size={16} className="text-success" />
+              </div>
+              <div
+                style={{
+                  fontSize: '1.45rem',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--success-text, #10b981)',
+                }}
+              >
+                {Math.max(0, (summary.matched_records ?? 0) - (summary.field_mismatches ?? 0)).toLocaleString()}
+              </div>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                Records with identical values
+              </span>
             </div>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
-              Directional balance (Source - Target)
-            </span>
-          </div>
 
-          {/* 3. Reconciled / Verified Total */}
-          <div
-            className="stat-card"
-            style={{
-              padding: '16px 18px',
-              backgroundColor: 'var(--bg-card-hover)',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border-color)',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
-                Reconciled Value
-              </span>
-              <ShieldCheck size={16} className="text-success" />
-            </div>
+            {/* 3. Records with Differences */}
             <div
+              className="stat-card"
               style={{
-                fontSize: '1.45rem',
-                fontWeight: 700,
-                fontFamily: 'var(--font-mono)',
-                color: 'var(--success-text, #10b981)',
+                padding: '16px 18px',
+                backgroundColor: 'var(--bg-card-hover)',
+                borderRadius: 'var(--radius-md)',
+                border: (summary.field_mismatches ?? 0) > 0 ? '1px solid var(--warning-border, #f59e0b)' : '1px solid var(--border-color)',
               }}
             >
-              {currencySymbol}
-              {(summary.verified_amount ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                  Differences Found
+                </span>
+                <AlertCircle size={16} className={(summary.field_mismatches ?? 0) > 0 ? 'text-warning' : 'text-dim'} />
+              </div>
+              <div
+                style={{
+                  fontSize: '1.45rem',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color: (summary.field_mismatches ?? 0) > 0 ? 'var(--warning-text, #f59e0b)' : 'var(--text-main)',
+                }}
+              >
+                {(summary.field_mismatches ?? 0).toLocaleString()}
+              </div>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                Records with value discrepancies
+              </span>
             </div>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
-              Verified clean match totals
-            </span>
-          </div>
 
-          {/* 4. Outstanding Discrepancy Amount */}
+            {/* 4. Attention Required */}
+            {(() => {
+              const attentionCount =
+                (summary.unmatched_source_records ?? 0) +
+                (summary.unmatched_target_records ?? 0) +
+                (summary.duplicate_source_keys_count ?? 0) +
+                (summary.duplicate_target_keys_count ?? 0);
+              return (
+                <div
+                  className="stat-card"
+                  style={{
+                    padding: '16px 18px',
+                    backgroundColor: 'var(--bg-card-hover)',
+                    borderRadius: 'var(--radius-md)',
+                    border: attentionCount > 0 ? '1px solid var(--danger-border, #f87171)' : '1px solid var(--border-color)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                      Attention Required
+                    </span>
+                    <AlertCircle size={16} className={attentionCount > 0 ? 'text-danger' : 'text-dim'} />
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '1.45rem',
+                      fontWeight: 700,
+                      fontFamily: 'var(--font-mono)',
+                      color: attentionCount > 0 ? 'var(--danger-text, #ef4444)' : 'var(--text-main)',
+                    }}
+                  >
+                    {attentionCount.toLocaleString()}
+                  </div>
+                  <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                    Missing records or duplicate keys
+                  </span>
+                </div>
+              );
+            })()}
+          </div>
+        ) : (
           <div
-            className="stat-card"
             style={{
-              padding: '16px 18px',
-              backgroundColor: 'var(--bg-card-hover)',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border-color)',
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+              gap: 14,
+              marginBottom: 20,
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
-                Outstanding Variance
-              </span>
-              <AlertCircle size={16} className={(summary.outstanding_amount ?? 0) > 0 ? 'text-warning' : 'text-dim'} />
-            </div>
+            {/* 1. Gross Exception Exposure */}
             <div
+              className="stat-card"
               style={{
-                fontSize: '1.45rem',
-                fontWeight: 700,
-                fontFamily: 'var(--font-mono)',
-                color: (summary.outstanding_amount ?? 0) > 0 ? 'var(--warning-text, #f59e0b)' : 'var(--text-main)',
+                padding: '16px 18px',
+                backgroundColor: 'var(--bg-card-hover)',
+                borderRadius: 'var(--radius-md)',
+                border: (summary.gross_exposure ?? 0) > 0 ? '1px solid var(--danger-border, #f87171)' : '1px solid var(--border-color)',
               }}
             >
-              {currencySymbol}
-              {(summary.outstanding_amount ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                  Gross Exposure
+                </span>
+                <DollarSign size={16} className={(summary.gross_exposure ?? 0) > 0 ? 'text-danger' : 'text-dim'} />
+              </div>
+              <div
+                style={{
+                  fontSize: '1.45rem',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color: (summary.gross_exposure ?? 0) > 0 ? 'var(--danger-text, #ef4444)' : 'var(--text-main)',
+                }}
+              >
+                {currencySymbol}
+                {(summary.gross_exposure ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                Absolute monetary variance (|src - tgt|)
+              </span>
             </div>
-            <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
-              Unreconciled / disputed values
-            </span>
+
+            {/* 2. Net Variance */}
+            <div
+              className="stat-card"
+              style={{
+                padding: '16px 18px',
+                backgroundColor: 'var(--bg-card-hover)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-color)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                  Net Variance
+                </span>
+                <Info size={16} className="text-dim" />
+              </div>
+              <div
+                style={{
+                  fontSize: '1.45rem',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color:
+                    (summary.net_variance ?? 0) > 0
+                      ? 'var(--warning-text, #f59e0b)'
+                      : (summary.net_variance ?? 0) < 0
+                      ? 'var(--danger-text, #ef4444)'
+                      : 'var(--text-main)',
+                }}
+              >
+                {(summary.net_variance ?? 0) >= 0 ? '+' : ''}
+                {currencySymbol}
+                {(summary.net_variance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                Directional balance (Source - Target)
+              </span>
+            </div>
+
+            {/* 3. Reconciled / Verified Total */}
+            <div
+              className="stat-card"
+              style={{
+                padding: '16px 18px',
+                backgroundColor: 'var(--bg-card-hover)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-color)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                  Reconciled Value
+                </span>
+                <ShieldCheck size={16} className="text-success" />
+              </div>
+              <div
+                style={{
+                  fontSize: '1.45rem',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--success-text, #10b981)',
+                }}
+              >
+                {currencySymbol}
+                {(summary.verified_amount ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                Verified clean match totals
+              </span>
+            </div>
+
+            {/* 4. Outstanding Discrepancy Amount */}
+            <div
+              className="stat-card"
+              style={{
+                padding: '16px 18px',
+                backgroundColor: 'var(--bg-card-hover)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--border-color)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-dim)' }}>
+                  Outstanding Variance
+                </span>
+                <AlertCircle size={16} className={(summary.outstanding_amount ?? 0) > 0 ? 'text-warning' : 'text-dim'} />
+              </div>
+              <div
+                style={{
+                  fontSize: '1.45rem',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color: (summary.outstanding_amount ?? 0) > 0 ? 'var(--warning-text, #f59e0b)' : 'var(--text-main)',
+                }}
+              >
+                {currencySymbol}
+                {(summary.outstanding_amount ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: 4, display: 'block' }}>
+                Unreconciled / disputed values
+              </span>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Resilient Alert: Zero Exceptions Clean State */}
         {isZeroExceptions && (
@@ -457,9 +621,28 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
           >
             <CheckCircle2 size={20} className="text-success" style={{ flexShrink: 0 }} />
             <div>
-              <strong style={{ fontSize: '0.95rem' }}>100% Financial Reconciliation Verified</strong>
+              <strong style={{ fontSize: '0.95rem' }}>
+                {isOrgMode ? '100% Record Match Verified' : '100% Financial Reconciliation Verified'}
+              </strong>
               <p style={{ margin: '2px 0 0', fontSize: '0.82rem', color: 'var(--text-dim)' }}>
-                Zero monetary exposure and zero record exceptions detected. All matched line items have identical values and balanced amounts.
+                {isOrgMode
+                  ? 'Zero record exceptions detected. All matched records have identical values across mapped fields.'
+                  : 'Zero monetary exposure and zero record exceptions detected. All matched line items have identical values and balanced amounts.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {isUntestedFields && (
+          <div
+            className="alert alert-warning"
+            style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}
+          >
+            <AlertCircle size={20} className="text-warning" style={{ flexShrink: 0 }} />
+            <div>
+              <strong style={{ fontSize: '0.95rem' }}>Keys Matched — No Fields Evaluated</strong>
+              <p style={{ margin: '2px 0 0', fontSize: '0.82rem', color: 'var(--text-dim)' }}>
+                Records aligned on identifier keys across files, but zero comparable fields were evaluated. Configure column mappings in file setup to verify record values.
               </p>
             </div>
           </div>
@@ -499,7 +682,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                 }}
                 onClick={() => setViewMode('records')}
               >
-                <TableProperties size={14} /> Record Grid ({filteredResults.length})
+                <TableProperties size={14} /> All Records ({filteredResults.length})
               </button>
               <button
                 type="button"
@@ -512,7 +695,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                 }}
                 onClick={() => setViewMode('clusters')}
               >
-                <Layers size={14} /> Exception Clusters ({clusters.length})
+                <Layers size={14} /> Grouped Differences ({clusters.length})
               </button>
             </div>
 
@@ -522,7 +705,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                 className="btn btn-primary btn-sm"
                 onClick={openBulkModalForSelected}
               >
-                <CheckSquare size={14} /> Bulk Review Selected ({selectedRowIds.size}) &mdash; {currencySymbol}{selectedRowsExposure.toLocaleString()}
+                <CheckSquare size={14} /> Review Selected ({selectedRowIds.size}) &mdash; {currencySymbol}{selectedRowsExposure.toLocaleString()}
               </button>
             )}
           </div>
@@ -530,7 +713,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
           <span className="card-description" style={{ fontSize: '0.82rem' }}>
             {viewMode === 'records'
               ? `${filteredResults.length.toLocaleString()} matching records`
-              : `${clusters.length} root-cause exception clusters`}
+              : `${clusters.length} grouped difference categories`}
           </span>
         </div>
 
@@ -539,23 +722,23 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
           <div>
             {loadingClusters ? (
               <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-dim)' }}>
-                <span className="spinner" /> Loading exception clusters...
+                <span className="spinner" /> Loading grouped differences...
               </div>
             ) : clusters.length === 0 ? (
               <div className="empty-state" style={{ padding: '48px 20px' }}>
                 <CheckCircle2 size={32} className="text-success" />
-                <h3 className="empty-title">Zero Exception Clusters</h3>
-                <p className="empty-text">No recurring exception signatures or discrepancies detected in this dataset.</p>
+                <h3 className="empty-title">No Differences Detected</h3>
+                <p className="empty-text">No recurring differences or issues detected in these files.</p>
               </div>
             ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(320px, 100%), 1fr))', gap: 16 }}>
                 {clusters.map((cl) => {
                   const isHigh = cl.total_exposure >= 1000;
                   const isBlock = cl.severity.toUpperCase() === 'BLOCKING';
                   return (
                     <div
                       key={cl.cluster_id}
-                      className="card"
+                      className="card cluster-card"
                       style={{
                         backgroundColor: 'var(--bg-card-hover)',
                         border: isBlock
@@ -579,7 +762,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                           >
                             {cl.severity.toUpperCase()}
                           </span>
-                          <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
+                          <span className="cluster-id" style={{ fontSize: '0.72rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', textAlign: 'right' }}>
                             {cl.cluster_id}
                           </span>
                         </div>
@@ -611,7 +794,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                             </div>
                           </div>
                           <div>
-                            <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Exposure</span>
+                            <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>Difference Amount</span>
                             <div
                               style={{
                                 fontSize: '1.1rem',
@@ -657,13 +840,13 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                           style={{ flex: 1 }}
                           onClick={() => openBulkModalForCluster(cl)}
                         >
-                          <CheckCircle2 size={13} /> Bulk Review
+                          <CheckCircle2 size={13} /> Group Review
                         </button>
                         <button
                           type="button"
                           className="btn btn-secondary btn-sm"
                           onClick={() => handleClusterViewRecords(cl.cluster_id)}
-                          title="Filter Grid to this Cluster"
+                          title="Filter records to this difference group"
                         >
                           <Eye size={13} /> View ({cl.total_records})
                         </button>
@@ -740,7 +923,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                   aria-label="Filter by cluster"
                   style={{ maxWidth: 190 }}
                 >
-                  <option value="all">All Exception Clusters</option>
+                  <option value="all">All Difference Groups</option>
                   {clusters.map((c) => (
                     <option key={c.cluster_id} value={c.cluster_id}>
                       {c.cluster_name} ({c.total_records})
@@ -811,8 +994,8 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                   onChange={(e) => setSortOption(e.target.value)}
                   aria-label="Sort by financial exposure"
                 >
-                  <option value="exposure_desc">Exposure: High → Low</option>
-                  <option value="exposure_asc">Exposure: Low → High</option>
+                  <option value="exposure_desc">Difference Amount: High → Low</option>
+                  <option value="exposure_asc">Difference Amount: Low → High</option>
                   <option value="variance_desc">Net Variance: High → Low</option>
                   <option value="variance_asc">Net Variance: Low → High</option>
                   <option value="row_asc">Source Row: Low → High</option>
@@ -846,19 +1029,23 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                         )}
                       </button>
                     </th>
-                    <th style={{ width: '17%' }}>Key Columns</th>
+                    <th style={{ width: '17%' }}>Matching Columns</th>
                     <th style={{ width: '12%' }}>Match Status</th>
-                    <th style={{ width: '12%' }}>Resolution</th>
-                    <th style={{ width: '13%', textAlign: 'right' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4 }}>
-                        <span>Exposure</span>
-                        <ArrowDownUp size={12} className="text-dim" />
-                      </div>
+                    <th style={{ width: '12%' }}>Review Status</th>
+                    <th style={{ width: '13%', textAlign: isOrgMode ? 'center' : 'right' }}>
+                      {isOrgMode ? (
+                        <span>Differences</span>
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4 }}>
+                          <span>Difference Amount</span>
+                          <ArrowDownUp size={12} className="text-dim" />
+                        </div>
+                      )}
                     </th>
                     <th style={{ width: '12%' }}>Assignee</th>
-                    <th style={{ width: '10%' }}>Source / Target</th>
-                    <th>Differences / Message</th>
-                    <th style={{ width: 60, textAlign: 'center' }}>Inspect</th>
+                    <th style={{ width: '10%' }}>File Row</th>
+                    <th>Differences / Details</th>
+                    <th style={{ width: 60, textAlign: 'center' }}>View</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -874,8 +1061,8 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                           </h3>
                           <p className="empty-text" style={{ marginBottom: hasActiveFilters ? 14 : 0 }}>
                             {hasActiveFilters
-                              ? 'Try broadening your category, status, monetary range, or search criteria.'
-                              : 'This reconciliation returned no individual records.'}
+                              ? 'Try clearing filters or search terms.'
+                              : 'This comparison returned no individual records.'}
                           </p>
                           {hasActiveFilters && (
                             <button type="button" className="btn btn-secondary btn-sm" onClick={clearFilters}>
@@ -910,7 +1097,7 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                             )}
                           </td>
                           <td>
-                            <code className="key-code">{JSON.stringify(row.key_values)}</code>
+                            <code className="key-code key-code-wrap">{formatKeyValues(row.key_values)}</code>
                           </td>
                           <td>
                             <StatusBadge status={row.match_status} />
@@ -941,29 +1128,55 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
                               {resStatus}
                             </span>
                           </td>
-                          <td className="cell-num">
-                            <span
-                              style={{
-                                fontFamily: 'var(--font-mono)',
-                                fontWeight: exposure > 0 ? 600 : 400,
-                                color: isHighExposure
-                                  ? 'var(--danger-text)'
-                                  : exposure > 0
-                                  ? 'var(--warning-text)'
-                                  : 'var(--text-dim)',
-                              }}
-                            >
-                              {currencySymbol}
-                              {exposure.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </span>
-                          </td>
+                          {isOrgMode ? (
+                            <td style={{ textAlign: 'center' }}>
+                              {row.field_differences && row.field_differences.length > 0 ? (
+                                <span
+                                  className="badge badge-warning"
+                                  style={{ fontSize: '0.74rem' }}
+                                >
+                                  {row.field_differences.length} {row.field_differences.length === 1 ? 'difference' : 'differences'}
+                                </span>
+                              ) : row.match_status === 'identical' ? (
+                                <span
+                                  className="badge badge-success"
+                                  style={{ fontSize: '0.74rem' }}
+                                >
+                                  Identical
+                                </span>
+                              ) : (
+                                <span className="text-dim" style={{ fontSize: '0.78rem' }}>—</span>
+                              )}
+                            </td>
+                          ) : (
+                            <td className="cell-num">
+                              <span
+                                style={{
+                                  fontFamily: 'var(--font-mono)',
+                                  fontWeight: exposure > 0 ? 600 : 400,
+                                  color: isHighExposure
+                                    ? 'var(--danger-text)'
+                                    : exposure > 0
+                                    ? 'var(--warning-text)'
+                                    : 'var(--text-dim)',
+                                }}
+                              >
+                                {currencySymbol}
+                                {exposure.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </td>
+                          )}
                           <td>
                             <span style={{ fontSize: '0.78rem', color: row.assigned_to ? 'var(--text-main)' : 'var(--text-dim)' }}>
                               {row.assigned_to || '—'}
                             </span>
                           </td>
                           <td style={{ fontSize: '0.8rem', fontFamily: 'var(--font-mono)' }}>
-                            S: {row.source_row_number ?? row.source_row_index ?? '—'} | T: {row.target_row_number ?? row.target_row_index ?? '—'}
+                            {fileLabels?.primary ? `${fileLabels.primary}: ` : 'S: '}
+                            {row.source_row_number ?? row.source_row_index ?? '—'}
+                            {' | '}
+                            {fileLabels?.target ? `${fileLabels.target}: ` : 'T: '}
+                            {row.target_row_number ?? row.target_row_index ?? '—'}
                           </td>
                           <td>
                             {row.field_differences && row.field_differences.length > 0 ? (
@@ -1047,6 +1260,8 @@ export const VerificationResultsView: React.FC<VerificationResultsViewProps> = (
         record={selectedRecord}
         projectId={projectId}
         runId={run?.id}
+        mode={isOrgMode ? 'organization' : 'financial'}
+        fileLabels={fileLabels}
       />
 
       {/* Bulk Review & Assignment Modal */}

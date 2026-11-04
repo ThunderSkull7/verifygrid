@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -350,5 +350,151 @@ describe('TemplatePanel lifecycle and management', () => {
       await screen.findByText("A template named 'College pilot' already exists."),
     ).toBeInTheDocument();
     expect(screen.getByLabelText('New template name')).toHaveValue('College pilot');
+  });
+});
+
+describe('Batch 5: Template Reliability, Error Feedback & State Transitions', () => {
+  it('displays loading state while templates are being fetched and transitions to loaded', async () => {
+    let resolveList: (val: any) => void;
+    const listPromise = new Promise((resolve) => {
+      resolveList = resolve;
+    });
+    apiMocks.listTemplates.mockReturnValue(listPromise);
+
+    renderPanel();
+
+    // Check loading indicator and loading option in select
+    expect(screen.getByText('Loading setups…')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Loading saved setups…' })).toBeInTheDocument();
+
+    // Resolve templates
+    resolveList!([savedTemplate]);
+
+    // Transitions to ready: loading indicators disappear, template options available
+    expect(await screen.findByRole('option', { name: /College pilot/ })).toBeInTheDocument();
+    expect(screen.queryByText('Loading setups…')).not.toBeInTheDocument();
+  });
+
+  it('displays useful empty state when no saved templates exist', async () => {
+    apiMocks.listTemplates.mockResolvedValue([]);
+    renderPanel();
+
+    expect(
+      await screen.findByText(/No saved setups yet\. Once you set up and match your spreadsheet columns/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '— No saved setups yet —' })).toBeInTheDocument();
+  });
+
+  it('allows user to retry after a failed template load request', async () => {
+    const user = userEvent.setup();
+    apiMocks.listTemplates.mockRejectedValueOnce(
+      new Error('Network error connecting to VerifyGrid API: Failed to fetch'),
+    );
+
+    renderPanel();
+
+    // Actionable network error shown
+    expect(
+      await screen.findByText('Network error connecting to VerifyGrid API: Failed to fetch'),
+    ).toBeInTheDocument();
+    const retryBtn = screen.getByRole('button', { name: /Retry/ });
+    expect(retryBtn).toBeInTheDocument();
+
+    // Setup success for retry
+    apiMocks.listTemplates.mockResolvedValueOnce([savedTemplate]);
+    await user.click(retryBtn);
+
+    // Error cleared and templates loaded
+    expect(await screen.findByRole('option', { name: /College pilot/ })).toBeInTheDocument();
+    expect(
+      screen.queryByText('Network error connecting to VerifyGrid API: Failed to fetch'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('prevents duplicate submissions under rapid synchronous clicks and releases lock upon completion', async () => {
+    const user = userEvent.setup();
+    let resolveFirstCreate: (val: any) => void;
+    const firstPromise = new Promise((resolve) => {
+      resolveFirstCreate = resolve;
+    });
+    apiMocks.createTemplate.mockReturnValueOnce(firstPromise);
+
+    renderPanel();
+
+    await user.click(screen.getByRole('button', { name: /Save as new template/ }));
+    await user.type(screen.getByLabelText('New template name'), 'Unique Setup');
+    const saveBtn = screen.getByRole('button', { name: /Save as new$/ });
+
+    // Trigger multiple clicks synchronously within one event loop boundary using fireEvent
+    fireEvent.click(saveBtn);
+    fireEvent.click(saveBtn);
+    fireEvent.click(saveBtn);
+
+    // Exactly one API mutation request should be dispatched while pending
+    expect(apiMocks.createTemplate).toHaveBeenCalledTimes(1);
+
+    // Complete the first operation
+    resolveFirstCreate!({ ...savedTemplate, name: 'Unique Setup' });
+    await waitFor(() => expect(screen.queryByText('Saving…')).not.toBeInTheDocument());
+    expect(await screen.findByText("Saved new template 'Unique Setup'.")).toBeInTheDocument();
+
+    // Confirm the lock is released and another legitimate submission can succeed afterward
+    apiMocks.createTemplate.mockResolvedValueOnce({ ...savedTemplate, name: 'Second Setup' });
+    await user.click(screen.getByRole('button', { name: /Save as new template/ }));
+    await user.type(screen.getByLabelText('New template name'), 'Second Setup');
+    const secondSaveBtn = screen.getByRole('button', { name: /Save as new$/ });
+    await user.click(secondSaveBtn);
+
+    await waitFor(() => expect(apiMocks.createTemplate).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Saved new template 'Second Setup'.")).toBeInTheDocument();
+  });
+
+  it('renders actionable error message when save fails with network error', async () => {
+    const user = userEvent.setup();
+    apiMocks.createTemplate.mockRejectedValue(
+      new Error('Network error connecting to VerifyGrid API: Failed to fetch'),
+    );
+
+    renderPanel();
+
+    await user.click(screen.getByRole('button', { name: /Save as new template/ }));
+    await user.type(screen.getByLabelText('New template name'), 'Test Setup');
+    await user.click(screen.getByRole('button', { name: /Save as new$/ }));
+
+    expect(
+      await screen.findByText(
+        "We couldn't connect to VerifyGrid to save this setup. Check your connection and try again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('prevents misleading success message and reports blocking issues when backend apply returns blocking issues', async () => {
+    const user = userEvent.setup();
+    apiMocks.applyTemplate.mockResolvedValue({
+      template_id: savedTemplate.id,
+      project_id: project.id,
+      mode: 'organization',
+      effective_request: {} as any,
+      validation_report: {
+        blocking: true,
+        issues: [{ slot: 'academic', message: 'Identity key column missing in file' }],
+        warnings: [],
+      },
+    });
+
+    renderPanel();
+    await chooseTemplate(user);
+    await bindSlot(user, 'academic', 'file-academic');
+    await bindSlot(user, 'hostel', 'file-hostel');
+    await bindSlot(user, 'library', 'file-library');
+    await user.click(screen.getByRole('button', { name: 'Apply to uploaded files' }));
+
+    // Blocking issues displayed, never misleading success
+    expect(
+      await screen.findByText(/Template application blocked — fix the issues below, then apply again\./),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Identity key column missing in file/)).toBeInTheDocument();
+    expect(screen.queryByText(/validated successfully/)).not.toBeInTheDocument();
+    expect(onTemplateApplied).not.toHaveBeenCalled();
   });
 });
