@@ -39,11 +39,14 @@ flowchart TD
 
 ## 2. Test Execution Matrix & Quick Reference
 
+> [!NOTE]
+> The automated suite comprises **535 distinct passing tests**: **449 backend tests** (with 21 live-PostgreSQL integration tests skipped offline) and **86 frontend tests** (29 logic + 57 component tests). The Target Guard (76 tests) and Financial Aggregation (39 tests) suites are focused regression modules executed within the 449 backend suite, not additive counts.
+
 | Test Suite | Command | Execution Time | Passed | Skipped | Scope |
 |---|---|---|---|---|---|
 | **Backend Core (Offline)** | `pytest backend/tests -m "not postgres"` | ~25 s | **449** | 21 | Full backend excluding live PostgreSQL integration. |
-| **Migration Target Guard** | `pytest backend/tests/test_migration_env_guard.py` | ~1.8 s | **76** | 0 | Strict endpoint identity, staging isolation, transaction safety. |
-| **Financial Aggregation** | `pytest backend/tests/test_financial_aggregation_batches_a_d.py` | ~1.2 s | **39** | 0 | Batches A–D: duplicate parents, valid zero vs null, sentinels, payment flags. |
+| **Migration Target Guard (Subset)** | `pytest backend/tests/test_migration_env_guard.py` | ~1.8 s | **76** | 0 | Strict endpoint identity, staging isolation, transaction safety. |
+| **Financial Aggregation (Subset)** | `pytest backend/tests/test_financial_aggregation_batches_a_d.py` | ~1.2 s | **39** | 0 | Batches A–D: duplicate parents, valid zero vs null, sentinels, payment flags. |
 | **Frontend Full Suite** | `cd frontend && npm test` | ~5.5 s | **86** | 0 | Combined logic (29) and component (57) suites. |
 | **Frontend Logic Suite** | `cd frontend && npm run test:logic` | ~0.8 s | **29** | 0 | Column mapping heuristics, fuzzy synonym matching, payload construction. |
 | **Frontend Component Suite** | `cd frontend && npm run test:components` | ~4.7 s | **57** | 0 | React 19 UI components, wizard navigation, error boundaries. |

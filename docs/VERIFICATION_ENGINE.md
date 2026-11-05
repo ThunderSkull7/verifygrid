@@ -19,7 +19,7 @@ flowchart TD
     
     D & E & F --> G["Receipt Collision & Integrity Sentry\n(Prevent Double-Counting & Cyclic Collisions)"]
     G --> H["Discrepancy Classifier\n(Exact, Partial, Discrepancy, Orphan, Ambiguous)"]
-    H --> I["Immutable Audit Trail & Summary Metrics"]
+    H --> I["Tamper-Evident Audit Trail & Summary Metrics"]
 ```
 
 ---

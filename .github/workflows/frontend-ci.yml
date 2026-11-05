@@ -5,10 +5,12 @@ on:
     branches: [main, feature/*]
     paths:
       - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
   push:
     branches: [main, feature/*]
     paths:
       - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
 
 permissions:
   contents: read

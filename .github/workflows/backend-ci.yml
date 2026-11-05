@@ -5,10 +5,12 @@ on:
     branches: [main, feature/*]
     paths:
       - "backend/**"
+      - ".github/workflows/backend-ci.yml"
   push:
     branches: [main, feature/*]
     paths:
       - "backend/**"
+      - ".github/workflows/backend-ci.yml"
 
 permissions:
   contents: read
@@ -34,14 +36,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run offline test suite (excluding live postgres)
+      - name: Run complete offline backend test suite (including target guard & aggregation)
         run: |
-          pytest tests -m "not postgres" --maxfail=1 -q
-
-      - name: Run migration target guard test suite
-        run: |
-          pytest tests/test_migration_env_guard.py -v
-
-      - name: Run financial aggregation correctness regression tests
-        run: |
-          pytest tests/test_financial_aggregation_batches_a_d.py -v
+          pytest tests -m "not postgres" -v

@@ -18,7 +18,7 @@
 
 ## 1. Overview
 
-**VerifyGrid** is a deterministic, high-throughput verification and financial reconciliation platform designed for mission-critical institutional auditing. Built to eliminate silent data loss and false-positive reconciliations, VerifyGrid cross-references disparate tabular datasets (such as academic registrar rosters vs. campus housing registries, or general ledger invoices vs. banking settlement receipts), categorizes discrepancies with mathematical rigor, and establishes an immutable, cryptographically verifiable audit trail.
+**VerifyGrid** is a deterministic, high-throughput verification and financial reconciliation platform designed for mission-critical institutional auditing. Built to eliminate silent data loss and false-positive reconciliations, VerifyGrid cross-references disparate tabular datasets (such as academic registrar rosters vs. campus housing registries, or general ledger invoices vs. banking settlement receipts), categorizes discrepancies with mathematical rigor, and establishes a tamper-evident, cryptographically verifiable audit trail.
 
 ### Key Engineering Principles
 - **Zero Silent Data Loss:** Duplicate parent keys, ambiguous line items, and multi-receipt allocations are explicitly preserved with distinct row lineage rather than overwritten in memory.
@@ -88,7 +88,7 @@ The following screenshots illustrate VerifyGrid's end-to-end reconciliation work
 ---
 
 ### 08. Cryptographic Audit Trail & Event Verification
-*Immutable SHA-256 chained audit log tracking reconciliation provenance, reviewer actions, and sign-offs.*
+*Tamper-evident SHA-256 chained audit log tracking reconciliation provenance, reviewer actions, and sign-offs.*
 ![08_cryptographic_audit](docs/screenshots/08_cryptographic_audit.png)
 
 ---
@@ -302,14 +302,20 @@ alembic upgrade head
 
 ## 8. Verification & Test Execution
 
-VerifyGrid maintains an automated test matrix of **535+ tests** across backend and frontend codebases:
+VerifyGrid maintains an automated test matrix of **535 passing tests** across backend and frontend codebases:
+
+> [!NOTE]
+> The test matrix comprises **449 backend tests** (with 21 live-PostgreSQL integration tests skipped offline) and **86 frontend tests** (29 logic + 57 component tests), totaling 535 passing tests. The 76 target guard tests (`test_migration_env_guard.py`) and 39 financial aggregation tests (`test_financial_aggregation_batches_a_d.py`) are focused regression suites included within the 449 backend total, not additive counts.
 
 ```
 ========================= Test Matrix Summary =========================
+Total Passing Tests:          535 passed (449 backend + 86 frontend)
 Backend Non-Postgres Suite:   449 passed, 21 skipped (~25 s)
-Target Guard Safety Suite:    76 passed (100% pass rate) (~1.8 s)
-Financial Aggregation Suite:  39 passed (100% pass rate) (~1.2 s)
-Frontend Full Suite:          86 passed (29 logic + 57 components) (~5.5 s)
+  ├── Target Guard Subset:    76 passed (included within backend total)
+  └── Financial Aggregation:  39 passed (included within backend total)
+Frontend Full Suite:          86 passed (~5.5 s)
+  ├── Logic Tests:            29 passed (Node.js test runner)
+  └── Component Tests:        57 passed (Vitest + RTL)
 =======================================================================
 ```
 

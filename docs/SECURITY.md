@@ -111,7 +111,7 @@ sequenceDiagram
 Reconciliation outcomes and supervisory sign-offs are backed by a cryptographically verifiable audit trail (`backend/app/models/audit_log.py`).
 
 ### 4.1 Chained Hash Architecture
-Every audit event generates an immutable cryptographic block containing:
+Every audit event generates a tamper-evident cryptographic block containing:
 - `entry_id`: Unique UUIDv4 identifier.
 - `run_id`: Associated reconciliation run.
 - `user_id`: Operator responsible for the action.

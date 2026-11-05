@@ -48,7 +48,7 @@ flowchart TB
         PreEngine["Streaming Preprocessing Engine\n(CSV / Excel XLSX chunk parsing, hash generation)"]
         NormEngine["Record Normalization & Inverted Index\n(RapidFuzz tokenization, phonetic, date, currency)"]
         AggEngine["Rule Engine & Aggregator\n(1:1, 1:Many, Split-Payment, Zero-Value Distinction)"]
-        AuditEngine["Cryptographic Audit Trail\n(SHA-256 Merkle / chained event provenance)"]
+        AuditEngine["Cryptographic Audit Trail\n(SHA-256 chained hash event provenance)"]
 
         RouterFiles --> PreEngine
         RouterVerify --> NormEngine --> AggEngine --> AuditEngine
@@ -128,7 +128,7 @@ The backend is built with **FastAPI 0.143**, **SQLAlchemy 2.1 (2.0-style)**, and
 | `app.routers.rules` | `/api/v1/rules` | Reconciliation rule authoring, validation, preview against sample data, fuzzy threshold tuning. |
 | `app.routers.templates` | `/api/v1/templates` | Higher-education and enterprise reconciliation templates (Tuition vs Bursar, Payroll vs GL). |
 | `app.routers.recipes` | `/api/v1/recipes` | Parameterized verification recipe storage, execution, and versioning. |
-| `app.routers.audit` | `/api/v1/audit` | Cryptographic audit trail logging, Merkle tree verification, sign-off state transitions. |
+| `app.routers.audit` | `/api/v1/audit` | Cryptographic audit trail logging, SHA-256 chained hash verification, sign-off state transitions. |
 | `app.routers.health` | `/api/v1/health` | Service liveness, readiness probes, and database ping verification (`/health/db`). |
 
 ---
