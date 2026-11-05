@@ -40,6 +40,11 @@ class TemplateSourceSlot(BaseModel):
         default=None,
         description="Batch 7 worksheet selection, revalidated against every new XLSX upload.",
     )
+    header_row: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Batch 7 header row index, revalidated against every new upload.",
+    )
 
     @field_validator("label", "sheet_name", "alias")
     @classmethod

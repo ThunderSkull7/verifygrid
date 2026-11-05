@@ -86,7 +86,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
         <div>
           <h1 className="page-title">Projects</h1>
           <p className="page-subtitle">
-            Organise datasets and verification workflows by workspace or audit cycle.
+            Organize your spreadsheets and record comparisons by department, team, or review cycle.
           </p>
         </div>
         <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
@@ -106,10 +106,10 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
             <div className="modal-header">
               <div>
                 <h3 className="card-title" id="create-project-title">
-                  New verification project
+                  New project
                 </h3>
                 <p className="card-description">
-                  Group related datasets and reconciliation runs into a single audit workspace.
+                  Group related spreadsheets and comparison runs into a single workspace.
                 </p>
               </div>
               <button
@@ -140,7 +140,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                   type="text"
                   required
                   className="form-input"
-                  placeholder="e.g. Q4 general ledger reconciliation"
+                  placeholder="e.g. Student Enrollment Audit 2026 or Fall Tuition Check"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                 />
@@ -153,7 +153,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                   id="project-description"
                   className="form-textarea"
                   rows={3}
-                  placeholder="Details regarding audit scope, datasets, or target systems…"
+                  placeholder="Notes about which spreadsheets or departments are included…"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                 />
@@ -192,8 +192,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
           </div>
           <h3 className="empty-title">No projects yet</h3>
           <p className="empty-text">
-            Create your first verification project to begin uploading CSV/XLSX files and
-            reconciling records.
+            Create your first project to upload spreadsheets and compare records.
           </p>
           <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
             <Plus size={16} /> Create project

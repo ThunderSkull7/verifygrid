@@ -50,6 +50,14 @@ export interface PreprocessingConfig {
   identifier_columns?: string[];
   max_rows?: number;
   selected_worksheet?: string | null;
+  header_row?: number | null;
+}
+
+export interface HeaderRowCandidate {
+  row_number: number;
+  columns: string[];
+  sample_preview?: string[];
+  is_likely_header: boolean;
 }
 
 export interface ValidationIssue {
@@ -85,6 +93,8 @@ export interface PreprocessingResult {
   preview_rows: Record<string, any>[];
   sheet_names?: string[] | null;
   selected_worksheet?: string | null;
+  detected_header_row?: number | null;
+  header_row_candidates?: HeaderRowCandidate[] | null;
 }
 
 export type MatchStatus =
@@ -484,9 +494,12 @@ export interface SourceDefinition {
   alias: string;
   file_id: string;
   is_primary?: boolean;
+  label?: string | null;
   key_columns: string[];
   field_mapping?: Record<string, string>;
   excluded_row_indices?: number[];
+  sheet_name?: string | null;
+  header_row?: number | null;
 }
 
 export interface MultiSourceVerificationRequest {
@@ -958,6 +971,8 @@ export interface UploadedDataset {
   label?: string;
   isPrimary?: boolean;
   selectedSheet?: string | null;
+  headerRow?: number | null;
+  contentHash?: string;
   profile?: PreprocessingResult;
 }
 
@@ -973,6 +988,7 @@ export interface TemplateSourceSlot {
   field_mapping: Record<string, string>;
   /** Batch 7 worksheet selection; revalidated against every new XLSX upload. */
   sheet_name?: string | null;
+  header_row?: number | null;
 }
 
 /** Versioned template configuration snapshot (organization mode, schema v1). */

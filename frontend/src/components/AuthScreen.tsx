@@ -71,29 +71,29 @@ export const AuthScreen: React.FC<AuthModalProps> = ({ initialMode = 'login', on
           <div className="brand-icon">
             <ShieldCheck size={22} />
           </div>
-          <h1>Audit-grade dataset reconciliation</h1>
+          <h1>Reliable spreadsheet comparison &amp; auditing</h1>
           <p className="auth-hero-tagline">
-            Compare source and target datasets, isolate discrepancies, and export defensible audit
-            reports — all in one workspace.
+            Compare your spreadsheets, find every difference, and export clear audit reports — all
+            in one place.
           </p>
           <ul className="auth-features">
             <li>
               <span className="auth-feature-icon">
                 <FileSpreadsheet size={14} />
               </span>
-              Upload CSV or XLSX datasets with automatic schema inference
+              Upload Excel and CSV spreadsheets with automatic column detection
             </li>
             <li>
               <span className="auth-feature-icon">
                 <GitCompareArrows size={14} />
               </span>
-              Match records on composite keys with tolerance-aware rules
+              Match records using IDs, codes, or composite columns
             </li>
             <li>
               <span className="auth-feature-icon">
                 <FileCheck2 size={14} />
               </span>
-              Persist audit runs and export CSV, Excel, and JSON reports
+              Save comparison runs and download clean summary reports anytime
             </li>
           </ul>
           <span className="auth-hero-foot">VerifyGrid — verification you can defend.</span>

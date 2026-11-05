@@ -37,7 +37,8 @@ FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@", "\t", "\r")
 def sanitize_formula_value(val: Any) -> Any:
     """
     Neutralize spreadsheet formula injection by prepending a single quote
-    if string starts with formula trigger characters (=, +, -, @, \\t, \\r).
+    if string starts with formula trigger characters (=, +, -, @, \\t, \\r)
+    or contains leading whitespace/tabs/CR followed by trigger characters.
     Pure numeric values (integers, floats, booleans) are preserved safely.
     """
     if val is None:
@@ -45,6 +46,11 @@ def sanitize_formula_value(val: Any) -> Any:
     if isinstance(val, (int, float, bool)):
         return val
     s = str(val)
+    if not s:
+        return ""
+    s_spaces = s.lstrip(" ")
+    if s_spaces and s_spaces[0] in ("\t", "\r"):
+        return "'" + s
     stripped = s.lstrip()
     if stripped and stripped[0] in FORMULA_TRIGGER_CHARS:
         if stripped[0] in ("+", "-"):
@@ -76,6 +82,19 @@ def _format_field_differences(diff_list: Optional[List[Dict[str, Any]]]) -> str:
         diff_type = d.get("difference_type", "diff")
         items.append(f"{field} [{diff_type}]: '{s_val}' vs '{t_val}'")
     return "; ".join(items)
+
+
+def _format_key_values(kv: Optional[Dict[str, Any]]) -> str:
+    """Format key_values into clean, human-readable text."""
+    if not kv:
+        return ""
+    if isinstance(kv, dict):
+        items = []
+        for k, v in kv.items():
+            s_val = sanitize_formula_value(v)
+            items.append(f"{k}: {s_val}")
+        return " · ".join(items)
+    return str(kv)
 
 
 # ==============================================================================
@@ -184,7 +203,7 @@ def generate_audit_workbook_xlsx(
     duration_sec = (run.completed_at - run.started_at).total_seconds() if (run.completed_at and run.started_at) else 0.0
     src_names = []
     if run.sources:
-        src_names = [s.get("alias") for s in run.sources if s.get("alias")]
+        src_names = [s.get("label") or s.get("name") or s.get("alias") for s in run.sources if (s.get("label") or s.get("name") or s.get("alias"))]
     elif run.source_file and run.target_file:
         src_names = [run.source_file.original_filename, run.target_file.original_filename]
 
@@ -297,7 +316,7 @@ def generate_audit_workbook_xlsx(
     ws2.row_dimensions[1].height = 25
 
     for r_idx, item in enumerate(discrepancies, start=2):
-        key_vals_str = json.dumps(item.key_values) if item.key_values else ""
+        key_vals_str = _format_key_values(item.key_values)
         src_row = item.source_row_number
         if src_row is None and item.source_row_numbers:
             src_row = ", ".join(str(x) for x in item.source_row_numbers)
@@ -798,6 +817,21 @@ def generate_csv_report(
     writer.writerow(["# Completed At", run.completed_at.isoformat() if run.completed_at else ""])
     writer.writerow(["# Key Columns", ", ".join(run.key_columns or [])])
 
+    src_lines = []
+    if getattr(run, "sources", None):
+        for s in run.sources:
+            label = s.get("label") or s.get("name") or s.get("alias") or "Source"
+            rows = s.get("rows_count") or s.get("row_count") or s.get("total_rows")
+            role = "Authoritative" if s.get("is_primary") else "Comparison"
+            src_lines.append(f"{label} ({role}, {rows} records)" if rows is not None else f"{label} ({role})")
+    elif getattr(run, "source_file", None) and getattr(run, "target_file", None):
+        src_lines = [
+            f"{run.source_file.original_filename} (Authoritative)",
+            f"{run.target_file.original_filename} (Comparison)",
+        ]
+    if src_lines:
+        writer.writerow(["# Sources", " | ".join(src_lines)])
+
     summary = run.summary or {}
     writer.writerow(["# Total Source Records", summary.get("total_source_records", 0)])
     writer.writerow(["# Total Target Records", summary.get("total_target_records", 0)])
@@ -826,7 +860,7 @@ def generate_csv_report(
     writer.writerow(headers)
 
     for item in discrepancies:
-        key_vals_str = json.dumps(item.key_values) if item.key_values else ""
+        key_vals_str = _format_key_values(item.key_values)
         src_row = item.source_row_number
         if src_row is None and item.source_row_numbers:
             src_row = ", ".join(str(r) for r in item.source_row_numbers)
@@ -924,6 +958,24 @@ def generate_xlsx_report(
         ("Project ID", str(run.project_id)),
         ("Status", run.status),
         ("Key Columns", ", ".join(run.key_columns or [])),
+    ]
+
+    src_lines = []
+    if getattr(run, "sources", None):
+        for s in run.sources:
+            label = s.get("label") or s.get("name") or s.get("alias") or "Source"
+            rows = s.get("rows_count") or s.get("row_count") or s.get("total_rows")
+            role = "Authoritative" if s.get("is_primary") else "Comparison"
+            src_lines.append(f"{label} ({role}, {rows} records)" if rows is not None else f"{label} ({role})")
+    elif getattr(run, "source_file", None) and getattr(run, "target_file", None):
+        src_lines = [
+            f"{run.source_file.original_filename} (Authoritative)",
+            f"{run.target_file.original_filename} (Comparison)",
+        ]
+    if src_lines:
+        metadata_rows.append(("Participating Sources", " | ".join(src_lines)))
+
+    metadata_rows.extend([
         ("Started At", run.started_at.isoformat() if run.started_at else ""),
         ("Completed At", run.completed_at.isoformat() if run.completed_at else ""),
         ("Total Source Records", summary.get("total_source_records", 0)),
@@ -936,7 +988,7 @@ def generate_xlsx_report(
         ("Duplicate Source Records", summary.get("duplicate_source_records", 0)),
         ("Duplicate Target Records", summary.get("duplicate_target_records", 0)),
         ("Total Discrepancies", summary.get("total_discrepancies", len(discrepancies))),
-    ]
+    ])
 
     ws_summary["A3"] = "Metric"
     ws_summary["B3"] = "Value"
@@ -971,7 +1023,7 @@ def generate_xlsx_report(
         cell.alignment = Alignment(horizontal="center")
 
     for r_idx, item in enumerate(discrepancies, start=2):
-        key_vals_str = json.dumps(item.key_values) if item.key_values else ""
+        key_vals_str = _format_key_values(item.key_values)
         src_row = item.source_row_number
         if src_row is None and item.source_row_numbers:
             src_row = ", ".join(str(r) for r in item.source_row_numbers)

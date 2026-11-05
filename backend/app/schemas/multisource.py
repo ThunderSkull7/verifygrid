@@ -62,6 +62,14 @@ class SourceDefinition(BaseModel):
             "and the used sheet is not user-verified. Ignored for CSV sources."
         ),
     )
+    header_row: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Batch 7: exact 1-based header row to parse for this source file. When omitted (None), "
+            "automatic header detection identifies likely title banners vs header rows."
+        ),
+    )
 
     @field_validator("label")
     @classmethod

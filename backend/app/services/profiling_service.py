@@ -509,6 +509,7 @@ def profile_and_persist_source_file(
     project_id: uuid.UUID,
     file_id: uuid.UUID,
     worksheet: Optional[str] = None,
+    header_row: Optional[int] = None,
     current_user: Optional[User] = None,
 ) -> Tuple[FileProfileSummary, List[QuarantinedRecord]]:
     """Extract records from source file, execute profiling, and persist profile sidecar.
@@ -546,6 +547,9 @@ def profile_and_persist_source_file(
         )
 
     cfg = PreprocessingConfig()
+    cfg_updates: Dict[str, Any] = {}
+    if header_row is not None:
+        cfg_updates["header_row"] = header_row
     # Batch 9: resolve the effective worksheet for this profiling pass.
     effective_worksheet: Optional[str] = None
     if source_file.file_type.lower() == "xlsx":
@@ -562,7 +566,9 @@ def profile_and_persist_source_file(
                         f"workbook. Available worksheets: {available}."
                     ),
                 )
-            cfg = cfg.model_copy(update={"selected_worksheet": effective_worksheet})
+            cfg_updates["selected_worksheet"] = effective_worksheet
+    if cfg_updates:
+        cfg = cfg.model_copy(update=cfg_updates)
     null_set = set(v.strip().lower() for v in cfg.null_values)
 
     (
@@ -779,6 +785,35 @@ def resolve_quarantine_records(
     )
 
 
+IDENTIFIER_SYNONYM_SETS = [
+    {"student_id", "studentid", "student_no", "student_number", "roll_no", "rollno", "reg_no", "registration_no", "enrollment_no", "enrolment_no", "enrol_no", "enrolment", "enrollment", "enrol", "matric_no", "id"},
+    {"employee_id", "empid", "emp_no", "staff_id"},
+    {"account_number", "account_no", "acc_no", "account_id"},
+    {"transaction_id", "txn_id", "tx_id", "reference_id", "ref_no"},
+]
+
+
+def are_identifier_synonyms(col1: str, col2: str) -> bool:
+    c1 = col1.strip().lower()
+    c2 = col2.strip().lower()
+    if c1 == c2:
+        return True
+    return any(c1 in s and c2 in s for s in IDENTIFIER_SYNONYM_SETS)
+
+
+def _is_descriptive_title_header(col_name: str) -> bool:
+    """Return True if a column name appears to be title/banner text rather than a valid matching key."""
+    clean = col_name.strip()
+    if len(clean) > 50:
+        return True
+    words = clean.lower().split()
+    if len(words) >= 4 and any(
+        w in words for w in ("report", "audit", "summary", "university", "college", "records", "department", "register", "export", "roster", "confidential")
+    ):
+        return True
+    return False
+
+
 def discover_multisource_candidate_keys(
     sources_records: Dict[str, List[Tuple[int, Dict[str, Any]]]],
     null_set: Optional[Set[str]] = None,
@@ -837,18 +872,36 @@ def discover_multisource_candidate_keys(
     # 2. Match candidate single columns across sources
     first_alias = aliases[0]
     for col_a in source_col_stats.get(first_alias, {}).keys():
+        if _is_descriptive_title_header(col_a):
+            continue
         matched_cols: Dict[str, str] = {first_alias: col_a}
         for other_alias in aliases[1:]:
             best_match = None
             best_sim = 0.0
             for col_b in source_col_stats.get(other_alias, {}).keys():
+                if _is_descriptive_title_header(col_b):
+                    continue
                 if col_a.lower() == col_b.lower():
                     best_match = col_b
                     best_sim = 1.0
                     break
-                sim = fuzz.token_sort_ratio(col_a.lower(), col_b.lower()) / 100.0
-                if sim > best_sim and sim >= 0.75:
-                    best_sim = sim
+                is_synonym = are_identifier_synonyms(col_a, col_b)
+                s_a = source_col_stats[first_alias][col_a]["values"]
+                s_b = source_col_stats[other_alias][col_b]["values"]
+                val_overlap = (len(s_a & s_b) / max(1, min(len(s_a), len(s_b)))) if s_a and s_b else 0.0
+                name_sim = fuzz.token_sort_ratio(col_a.lower(), col_b.lower()) / 100.0
+
+                if is_synonym and val_overlap >= 0.3:
+                    effective_sim = 0.95 + (val_overlap * 0.05)
+                elif val_overlap >= 0.5:
+                    effective_sim = 0.85 + (val_overlap * 0.15)
+                elif is_synonym:
+                    effective_sim = 0.80
+                else:
+                    effective_sim = name_sim
+
+                if effective_sim > best_sim and effective_sim >= 0.75:
+                    best_sim = effective_sim
                     best_match = col_b
             if best_match:
                 matched_cols[other_alias] = best_match
@@ -881,12 +934,37 @@ def discover_multisource_candidate_keys(
                 3,
             )
 
-            if avg_uniq >= 0.4 or avg_overlap >= 0.3:
+            is_student_id = any(
+                are_identifier_synonyms(c, "student_id")
+                for c in matched_cols.values()
+            )
+            is_suitable = avg_uniq >= 0.80 and avg_null <= 0.05
+            unsuitability_reason = None
+            if not is_suitable:
+                if avg_null > 0.05:
+                    unsuitability_reason = f"contains blank/null values ({avg_null * 100:.1f}% null rate)"
+                elif avg_uniq < 0.80:
+                    unsuitability_reason = f"contains duplicate values ({avg_uniq * 100:.1f}% uniqueness)"
+
+            if is_student_id and is_suitable:
+                overall_score = min(1.0, round(overall_score + 0.15, 3))
+                reason = (
+                    f"Recommended student identifier: {avg_uniq * 100:.1f}% uniqueness, "
+                    f"{avg_overlap * 100:.1f}% cross-source value overlap, "
+                    f"and {avg_null * 100:.1f}% null rate."
+                )
+            elif is_student_id and not is_suitable:
+                reason = f"Student identifier detected but unsuitable as unique key: {unsuitability_reason}."
+            elif is_suitable:
                 reason = (
                     f"Strong single candidate key: {avg_uniq * 100:.1f}% average uniqueness, "
                     f"{avg_overlap * 100:.1f}% cross-source value overlap, "
                     f"and {avg_null * 100:.1f}% null rate."
                 )
+            else:
+                reason = f"Candidate key: {avg_uniq * 100:.1f}% uniqueness, {unsuitability_reason or 'moderate overlap'}."
+
+            if avg_uniq >= 0.4 or avg_overlap >= 0.3:
                 recommendations.append(
                     MultiSourceKeyRecommendation(
                         key_name=col_a,

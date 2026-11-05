@@ -60,6 +60,14 @@ class PreprocessingConfig(BaseModel):
             "silently substituted: an unknown name fails with an actionable error."
         ),
     )
+    header_row: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Batch 7: 1-based row index to treat as the column headers. When omitted (None), "
+            "automatic header detection identifies likely title banners vs header rows."
+        ),
+    )
 
     model_config = ConfigDict(extra="ignore")
 
@@ -86,6 +94,15 @@ class ColumnMetadata(BaseModel):
     null_count: int = 0
     non_null_count: int = 0
     sample_values: List[Any] = Field(default_factory=list)
+
+
+class HeaderRowCandidate(BaseModel):
+    """Candidate row evaluated during header detection (Batch 7)."""
+
+    row_number: int = Field(..., description="1-based source row number")
+    columns: List[str] = Field(default_factory=list, description="Column names found in this candidate row")
+    sample_preview: List[str] = Field(default_factory=list, description="Preview of values in this row")
+    is_likely_header: bool = Field(default=False, description="Whether this row was identified as the likely header row")
 
 
 class PreprocessingResultResponse(BaseModel):
@@ -122,6 +139,14 @@ class PreprocessingResultResponse(BaseModel):
     selected_worksheet: Optional[str] = Field(
         default=None,
         description="Batch 7: the worksheet this preprocessing run parsed (XLSX only; None = active sheet).",
+    )
+    detected_header_row: Optional[int] = Field(
+        default=None,
+        description="Batch 7: 1-based row index identified as the table header row.",
+    )
+    header_row_candidates: Optional[List[HeaderRowCandidate]] = Field(
+        default=None,
+        description="Batch 7: initial rows evaluated as header candidates for manual selection.",
     )
 
     model_config = ConfigDict(from_attributes=True)

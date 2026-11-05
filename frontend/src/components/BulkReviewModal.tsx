@@ -66,7 +66,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
 
   const handleSubmitDecision = async () => {
     if (!justification.trim()) {
-      setError('A mandatory justification note is required to apply review decisions.');
+      setError('Please provide an explanation note before applying review decisions.');
       return;
     }
 
@@ -161,7 +161,8 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          maxHeight: '90vh',
+          maxHeight: '90dvh',
+          minWidth: 0,
           outline: 'none',
         }}
         onClick={(e) => e.stopPropagation()}
@@ -174,24 +175,26 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 10,
             backgroundColor: 'var(--bg-card-hover)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Layers size={20} className="text-accent" />
-            <div>
-              <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>
-                {cluster ? 'Bulk Cluster Review' : 'Bulk Record Review'}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: '1 1 220px', minWidth: 0 }}>
+            <Layers size={20} className="text-accent" style={{ flexShrink: 0, marginTop: 2 }} />
+            <div style={{ minWidth: 0 }}>
+              <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600, overflowWrap: 'anywhere' }}>
+                {cluster ? 'Group Review: Common Differences' : 'Bulk Record Review'}
               </h3>
-              <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)' }}>
-                {cluster ? cluster.cluster_name : `${count} selected exceptions`}
+              <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', overflowWrap: 'anywhere' }}>
+                {cluster ? cluster.cluster_name : `${count} selected differences`}
               </span>
             </div>
           </div>
           <button
             type="button"
             className="btn btn-ghost btn-sm"
-            style={{ padding: 6 }}
+            style={{ padding: 6, flexShrink: 0 }}
             onClick={onClose}
             aria-label="Close"
           >
@@ -223,7 +226,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
               setError(null);
             }}
           >
-            Resolution Decision
+            Review Decision
           </button>
           <button
             type="button"
@@ -246,12 +249,12 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div style={{ padding: 20, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ padding: 20, flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Target Impact Banner */}
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
               gap: 12,
               padding: 12,
               backgroundColor: 'var(--bg-card-hover)',
@@ -261,7 +264,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
           >
             <div>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                Total Affected Records
+                Records with this difference
               </span>
               <div style={{ fontSize: '1.2rem', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                 {count.toLocaleString()}
@@ -269,7 +272,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
             </div>
             <div>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                Aggregated Financial Exposure
+                Total difference amount
               </span>
               <div
                 style={{
@@ -306,8 +309,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
             >
               <ShieldAlert size={18} style={{ flexShrink: 0 }} />
               <div>
-                <strong>Hard Blocking Rule Safeguard:</strong> This cluster contains BLOCKING rule failures. Bulk
-                approval requires explicit override attestation.
+                <strong>Blocking issues:</strong> This group contains items with blocking issues. Approving requires checking the override box.
               </div>
             </div>
           )}
@@ -335,7 +337,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                 <AlertTriangle size={16} className="text-warning" />
                 <strong style={{ fontSize: '0.9rem' }}>
-                  Partial Bulk Resolution ({resultReport.succeeded} resolved, {resultReport.failed} blocked)
+                  Partial Review Update ({resultReport.succeeded} updated, {resultReport.failed} blocked)
                 </strong>
               </div>
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: '0.8rem', color: 'var(--danger-text)' }}>
@@ -363,7 +365,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
             <>
               <div>
                 <label style={{ fontSize: '0.85rem', fontWeight: 600, display: 'block', marginBottom: 8 }}>
-                  Select Resolution Action:
+                  Select Review Decision:
                 </label>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8 }}>
                   {(['APPROVE', 'REJECT', 'FORCE_MATCH', 'ESCALATE', 'REOPEN'] as const).map((opt) => {
@@ -412,7 +414,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <label style={{ fontSize: '0.82rem', color: 'var(--text-dim)', flex: 1 }}>
-                      Max Record Exposure Threshold ($):
+                      Max difference amount per record ($):
                     </label>
                     <input
                       type="number"
@@ -440,7 +442,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
                         checked={allowBlockingOverride}
                         onChange={(e) => setAllowBlockingOverride(e.target.checked)}
                       />
-                      <span>Allow override on hard BLOCKING rule failures</span>
+                      <span>Allow approving items with blocking issues</span>
                     </label>
                   )}
                 </div>
@@ -449,12 +451,12 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
               {/* Mandatory Justification Note */}
               <div>
                 <label style={{ fontSize: '0.85rem', fontWeight: 600, display: 'block', marginBottom: 6 }}>
-                  Mandatory Audit Justification Note: <span style={{ color: 'var(--danger-text)' }}>*</span>
+                  Explanation note (required): <span style={{ color: 'var(--danger-text)' }}>*</span>
                 </label>
                 <textarea
                   className="form-textarea"
                   rows={3}
-                  placeholder="e.g. Approved differences: verified with partner bank that lag was caused by public holiday settlement schedule."
+                  placeholder="e.g. Verified with enrollment office that student registered late; approved."
                   value={justification}
                   onChange={(e) => setJustification(e.target.value)}
                   style={{ width: '100%', fontSize: '0.82rem' }}
@@ -467,7 +469,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
           {activeTab === 'assignment' && (
             <div>
               <label style={{ fontSize: '0.85rem', fontWeight: 600, display: 'block', marginBottom: 6 }}>
-                Assignee Name or Email Address: <span style={{ color: 'var(--danger-text)' }}>*</span>
+                Assign to reviewer (Name or Email): <span style={{ color: 'var(--danger-text)' }}>*</span>
               </label>
               <input
                 type="text"
@@ -478,8 +480,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
                 style={{ width: '100%', marginBottom: 12, fontSize: '0.85rem' }}
               />
               <p style={{ fontSize: '0.78rem', color: 'var(--text-dim)', margin: 0 }}>
-                Assigning will flag all {count} records in this cluster to the designated reviewer and enable
-                quick-filtering via the &quot;Assigned to Me&quot; filter.
+                Assigning will route all {count} records in this group to the designated person for follow-up.
               </p>
             </div>
           )}
@@ -493,6 +494,7 @@ export const BulkReviewModal: React.FC<BulkReviewModalProps> = ({
             display: 'flex',
             justifyContent: 'flex-end',
             gap: 10,
+            flexWrap: 'wrap',
             backgroundColor: 'var(--bg-card-hover)',
           }}
         >

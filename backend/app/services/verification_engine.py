@@ -904,29 +904,55 @@ def verify_datasets(
                     )
 
             if not diffs:
-                identical_matches += 1
-                item = VerificationResultItem(
-                    key_values=k_dict,
-                    match_status=MatchStatus.IDENTICAL,
-                    discrepancy_category=DiscrepancyCategory.NONE,
-                    reason_code=ReasonCode.EXACT_MATCH,
-                    confidence_score=1.0,
-                    source_row_number=s_row_num,
-                    target_row_number=t_row_num,
-                    source_row_index=s_row_num,
-                    target_row_index=t_row_num,
-                    source_row_numbers=[s_row_num],
-                    target_row_numbers=[t_row_num],
-                    source_file_id=source_file_id,
-                    target_file_id=target_file_id,
-                    lineage=lineage,
-                    source_record=s_rec,
-                    target_record=t_rec,
-                    field_differences=[],
-                    message="Records match identically.",
-                )
-                if include_identical:
+                if not field_pairs:
+                    # Batch 8 Critical Safeguard: zero comparable fields evaluated.
+                    needs_review_records += 1
+                    item = VerificationResultItem(
+                        key_values=k_dict,
+                        match_status=MatchStatus.NEEDS_REVIEW,
+                        discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                        reason_code=ReasonCode.EXACT_MATCH,
+                        confidence_score=0.5,
+                        source_row_number=s_row_num,
+                        target_row_number=t_row_num,
+                        source_row_index=s_row_num,
+                        target_row_index=t_row_num,
+                        source_row_numbers=[s_row_num],
+                        target_row_numbers=[t_row_num],
+                        source_file_id=source_file_id,
+                        target_file_id=target_file_id,
+                        lineage=lineage,
+                        source_record=s_rec,
+                        target_record=t_rec,
+                        field_differences=[],
+                        message="Record keys matched across datasets, but no comparable fields were evaluated.",
+                    )
                     results.append(item)
+                    discrepancies.append(item)
+                else:
+                    identical_matches += 1
+                    item = VerificationResultItem(
+                        key_values=k_dict,
+                        match_status=MatchStatus.IDENTICAL,
+                        discrepancy_category=DiscrepancyCategory.NONE,
+                        reason_code=ReasonCode.EXACT_MATCH,
+                        confidence_score=1.0,
+                        source_row_number=s_row_num,
+                        target_row_number=t_row_num,
+                        source_row_index=s_row_num,
+                        target_row_index=t_row_num,
+                        source_row_numbers=[s_row_num],
+                        target_row_numbers=[t_row_num],
+                        source_file_id=source_file_id,
+                        target_file_id=target_file_id,
+                        lineage=lineage,
+                        source_record=s_rec,
+                        target_record=t_rec,
+                        field_differences=[],
+                        message="Records match identically.",
+                    )
+                    if include_identical:
+                        results.append(item)
             elif has_status_mismatch:
                 field_mismatches += 1
                 item = VerificationResultItem(
@@ -2474,7 +2500,17 @@ def verify_multisource_datasets(
                 # Batch 5: the attribute's configured owner (multi-primary mode) or
                 # the primary source (legacy mode) supplies the authoritative value.
                 if multi_primary:
-                    owner_alias = field_owner_map.get(attr, primary_alias)
+                    owner_alias = field_owner_map.get(attr)
+                    if not owner_alias or owner_alias not in sources_by_alias:
+                        # Find primary source that actually carries this attribute
+                        owner_cand = next(
+                            (s.alias for s in sources if s.is_primary and (attr in s.field_mapping.values() or attr in s.key_columns)),
+                            None,
+                        )
+                        if owner_cand is None:
+                            owner_cand = next((s.alias for s in sources if attr in s.field_mapping.values()), primary_alias)
+                        owner_alias = owner_cand
+
                     owner_source = sources_by_alias.get(owner_alias, primary_source)
                     owner_col = _resolve_mapped_column(owner_source.field_mapping, attr)
                     owner_rec = source_recs_map.get(owner_alias)
@@ -2616,34 +2652,67 @@ def verify_multisource_datasets(
                                     )
 
             if not diffs:
-                identical_matches += 1
-                item = VerificationResultItem(
-                    key_values=k_dict,
-                    match_status=MatchStatus.IDENTICAL,
-                    discrepancy_category=DiscrepancyCategory.NONE,
-                    reason_code=ReasonCode.EXACT_MATCH,
-                    confidence_score=1.0,
-                    source_row_indices=row_indices,
-                    source_records=source_recs_map,
-                    missing_in_sources=[],
-                    source_presence=presence,
-                    source_row_number=row_indices.get(primary_alias),
-                    target_row_number=next(
-                        (idx for a, idx in row_indices.items() if a != primary_alias and idx is not None),
-                        None,
-                    ),
-                    source_record=source_recs_map.get(primary_alias),
-                    target_record=next(
-                        (rec for a, rec in source_recs_map.items() if a != primary_alias and rec is not None),
-                        None,
-                    ),
-                    field_differences=[],
-                    message="Records match identically across all sources.",
-                    lineage=fb_lineage,
-                    unverified_fields=unverified_list,
-                )
-                if include_identical:
+                if not compare_attrs:
+                    # Batch 8 Critical Safeguard: zero comparable fields evaluated.
+                    # Record keys matched across sources, but no fields were checked.
+                    # Must NEVER be reported as an identical field match.
+                    needs_review_records += 1
+                    item = VerificationResultItem(
+                        key_values=k_dict,
+                        match_status=MatchStatus.NEEDS_REVIEW,
+                        discrepancy_category=DiscrepancyCategory.NEEDS_REVIEW,
+                        reason_code=ReasonCode.EXACT_MATCH,
+                        confidence_score=0.5,
+                        source_row_indices=row_indices,
+                        source_records=source_recs_map,
+                        missing_in_sources=[],
+                        source_presence=presence,
+                        source_row_number=row_indices.get(primary_alias),
+                        target_row_number=next(
+                            (idx for a, idx in row_indices.items() if a != primary_alias and idx is not None),
+                            None,
+                        ),
+                        source_record=source_recs_map.get(primary_alias),
+                        target_record=next(
+                            (rec for a, rec in source_recs_map.items() if a != primary_alias and rec is not None),
+                            None,
+                        ),
+                        field_differences=[],
+                        message="Record keys matched across sources, but no comparable fields were evaluated.",
+                        lineage=fb_lineage,
+                        unverified_fields=unverified_list,
+                    )
                     results.append(item)
+                    discrepancies.append(item)
+                else:
+                    identical_matches += 1
+                    item = VerificationResultItem(
+                        key_values=k_dict,
+                        match_status=MatchStatus.IDENTICAL,
+                        discrepancy_category=DiscrepancyCategory.NONE,
+                        reason_code=ReasonCode.EXACT_MATCH,
+                        confidence_score=1.0,
+                        source_row_indices=row_indices,
+                        source_records=source_recs_map,
+                        missing_in_sources=[],
+                        source_presence=presence,
+                        source_row_number=row_indices.get(primary_alias),
+                        target_row_number=next(
+                            (idx for a, idx in row_indices.items() if a != primary_alias and idx is not None),
+                            None,
+                        ),
+                        source_record=source_recs_map.get(primary_alias),
+                        target_record=next(
+                            (rec for a, rec in source_recs_map.items() if a != primary_alias and rec is not None),
+                            None,
+                        ),
+                        field_differences=[],
+                        message="Records match identically across all sources.",
+                        lineage=fb_lineage,
+                        unverified_fields=unverified_list,
+                    )
+                    if include_identical:
+                        results.append(item)
             elif has_status_mismatch:
                 field_mismatches += 1
                 item = VerificationResultItem(
@@ -2872,8 +2941,13 @@ def verify_multisource_project_files(
             s.excluded_row_indices = get_excluded_row_indices_for_file(path_resolved, src_worksheet)
 
         src_cfg = cfg
+        update_fields = {}
         if src_worksheet is not None:
-            src_cfg = cfg.model_copy(update={"selected_worksheet": src_worksheet})
+            update_fields["selected_worksheet"] = src_worksheet
+        if getattr(s, "header_row", None) is not None:
+            update_fields["header_row"] = s.header_row
+        if update_fields:
+            src_cfg = cfg.model_copy(update=update_fields)
 
         recs, _, _, _, _, _, _ = extract_dataset_records(path_resolved, sf.file_type, src_cfg)
         sources_records[s.alias] = recs

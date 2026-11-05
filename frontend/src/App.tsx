@@ -35,9 +35,9 @@ type ApiStatus = 'checking' | 'online' | 'offline';
 
 const TAB_META: Record<AppTab, { title: string; crumb: string }> = {
   projects: { title: 'Projects', crumb: 'Workspaces' },
-  verify: { title: 'Organization Verification', crumb: 'Verify records' },
-  financial: { title: 'Financial Auditing', crumb: 'Reconcile financial datasets' },
-  runs: { title: 'Verification history', crumb: 'Persistent runs' },
+  verify: { title: 'Organization Records', crumb: 'Compare records' },
+  financial: { title: 'Financial Auditing', crumb: 'Compare financial records' },
+  runs: { title: 'Audit History', crumb: 'Past runs' },
 };
 
 export const App: React.FC = () => {
@@ -64,18 +64,40 @@ export const App: React.FC = () => {
   // against the chosen worksheet so mappings, keys, and pre-flight metrics reflect
   // the exact data that will be verified. A failed re-profile reverts the choice.
   const handleWorksheetChange = (fileId: string, sheet: string | null) => {
-    const previous = uploadedDatasets.find((d) => d.id === fileId)?.selectedSheet ?? null;
+    const ds = uploadedDatasets.find((d) => d.id === fileId);
+    const previous = ds?.selectedSheet ?? null;
     updateDataset(fileId, { selectedSheet: sheet });
     if (!sheet) return;
     if (!activeProject) return;
     api
-      .preprocessFile(activeProject.id, fileId, { selected_worksheet: sheet })
+      .preprocessFile(activeProject.id, fileId, {
+        selected_worksheet: sheet,
+        header_row: ds?.headerRow ?? undefined,
+      })
       .then((profile) => updateDataset(fileId, { profile }))
       .catch(() => {
         updateDataset(fileId, { selectedSheet: previous });
       });
   };
-  const handleFileUploaded = (file: SourceFile, profile?: PreprocessingResult) => {
+
+  // Batch 7: explicit header row selection for spreadsheets with title banners or preamble rows.
+  const handleHeaderRowChange = (fileId: string, row: number | null) => {
+    const ds = uploadedDatasets.find((d) => d.id === fileId);
+    const previous = ds?.headerRow ?? null;
+    updateDataset(fileId, { headerRow: row });
+    if (!activeProject) return;
+    api
+      .preprocessFile(activeProject.id, fileId, {
+        header_row: row ?? undefined,
+        selected_worksheet: ds?.selectedSheet ?? undefined,
+      })
+      .then((profile) => updateDataset(fileId, { profile }))
+      .catch(() => {
+        updateDataset(fileId, { headerRow: previous });
+      });
+  };
+
+  const handleFileUploaded = (file: SourceFile, profile?: PreprocessingResult, contentHash?: string) => {
     setUploadedDatasets((prev) => [
       ...prev,
       {
@@ -88,6 +110,9 @@ export const App: React.FC = () => {
         // The first file defaults to the authoritative source so a valid setup
         // exists immediately; the selector makes the choice visible and editable.
         isPrimary: prev.length === 0,
+        selectedSheet: profile?.selected_worksheet ?? null,
+        headerRow: profile?.detected_header_row ?? null,
+        contentHash,
         profile,
       },
     ]);
@@ -191,7 +216,7 @@ export const App: React.FC = () => {
 
   const tabMeta = TAB_META[activeTab];
   const connectionLabel =
-    apiStatus === 'online' ? 'API connected' : apiStatus === 'offline' ? 'API offline' : 'Checking API…';
+    apiStatus === 'online' ? 'Connected' : apiStatus === 'offline' ? 'Offline' : 'Checking connection…';
 
   return (
     <div className={`app-container ${mobileNavOpen ? 'sidebar-open' : ''}`}>
@@ -294,6 +319,7 @@ export const App: React.FC = () => {
                   onLabelChange={(fileId, label) => updateDataset(fileId, { label })}
                   onRoleChange={(fileId, isPrimary) => updateDataset(fileId, { isPrimary })}
                   onWorksheetChange={handleWorksheetChange}
+                  onHeaderRowChange={handleHeaderRowChange}
                   onRemoveFile={removeDataset}
                 />
               )}
@@ -309,7 +335,7 @@ export const App: React.FC = () => {
                   </div>
                   <h3 className="empty-title">Select or create a project</h3>
                   <p className="empty-text">
-                    Audit history is scoped to a project. Select one to view its verification runs.
+                    Audit history is organized by project. Select a project to view its past comparison runs.
                   </p>
                   <button className="btn btn-primary" onClick={() => setActiveTab('projects')}>
                     Go to projects
@@ -339,6 +365,7 @@ export const WorkspaceVerification: React.FC<{
   onLabelChange: (fileId: string, label: string) => void;
   onRoleChange: (fileId: string, isPrimary: boolean) => void;
   onWorksheetChange?: (fileId: string, sheet: string | null) => void;
+  onHeaderRowChange?: (fileId: string, row: number | null) => void;
   onRemoveFile: (fileId: string) => void;
 }> = ({
   project,
@@ -348,6 +375,7 @@ export const WorkspaceVerification: React.FC<{
   onLabelChange,
   onRoleChange,
   onWorksheetChange,
+  onHeaderRowChange,
   onRemoveFile,
 }) => {
   const isFinancial = mode === 'financial';
@@ -355,17 +383,17 @@ export const WorkspaceVerification: React.FC<{
     <div>
       <div className="page-header" style={{ marginBottom: 16 }}>
         <div>
-          <h1 className="page-title">{isFinancial ? 'Financial dataset reconciliation' : 'Verify organization records'}</h1>
+          <h1 className="page-title">{isFinancial ? 'Financial Records' : 'Organization Records'}</h1>
           <p className="page-subtitle">
             {isFinancial
               ? (
                 <>
-                  Multi-source ingestion, candidate key discovery, and unified 5-step guided reconciliation against{' '}
+                  Upload and compare financial spreadsheets (ledger, bank, payment gateway), match columns, and find differences across{' '}
                   <strong>{project.name}</strong>.
                 </>
               ) : (
                 <>
-                  Upload files such as academic, hostel or membership registers, choose a matching key, and verify records across{' '}
+                  Upload spreadsheets such as academic, hostel or membership registers, match columns, and compare records across{' '}
                   <strong>{project.name}</strong>.
                 </>
               )}
@@ -381,6 +409,7 @@ export const WorkspaceVerification: React.FC<{
         onLabelChange={onLabelChange}
         onRoleChange={onRoleChange}
         onWorksheetChange={onWorksheetChange}
+        onHeaderRowChange={onHeaderRowChange}
         onRemoveFile={onRemoveFile}
         onRunCompleted={(_run) => {
           // Run completed successfully

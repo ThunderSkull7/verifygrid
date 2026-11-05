@@ -114,7 +114,7 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
             className={btnClass}
             onClick={() => setShowGoldenDropdown((prev) => !prev)}
             disabled={downloading !== null}
-            title="Download authoritative merged golden records"
+            title="Download verified master record spreadsheet"
             style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             {downloading?.startsWith('golden') ? (
@@ -122,7 +122,7 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
             ) : (
               <Sparkles size={14} className="text-warning" />
             )}
-            Golden Record Dataset
+            Master Records (Golden)
             <ChevronDown size={13} />
           </button>
 
@@ -144,7 +144,7 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
             >
               <div style={{ marginBottom: 8, paddingBottom: 6, borderBottom: '1px solid var(--border-color)' }}>
                 <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
-                  EXPORT FILTER POLICY
+                  EXPORT SELECTION
                 </span>
                 <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <label
@@ -179,14 +179,14 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
                       checked={goldenPolicy === 'ALL_WITH_STATUS_METADATA'}
                       onChange={() => setGoldenPolicy('ALL_WITH_STATUS_METADATA')}
                     />
-                    All with Status Metadata
+                    All Records (with status)
                   </label>
                 </div>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
-                  CHOOSE FORMAT
+                  FILE FORMAT
                 </span>
                 <button
                   type="button"
@@ -194,7 +194,7 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
                   style={{ justifyContent: 'flex-start', padding: '6px 8px', fontSize: '0.82rem' }}
                   onClick={() => handleDownloadGolden('csv')}
                 >
-                  <FileText size={13} /> Golden Dataset (.CSV)
+                  <FileText size={13} /> Master Records (.CSV)
                 </button>
                 <button
                   type="button"
@@ -202,7 +202,7 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
                   style={{ justifyContent: 'flex-start', padding: '6px 8px', fontSize: '0.82rem' }}
                   onClick={() => handleDownloadGolden('xlsx')}
                 >
-                  <FileSpreadsheet size={13} /> Golden Dataset (.XLSX)
+                  <FileSpreadsheet size={13} /> Master Records (.XLSX)
                 </button>
                 <button
                   type="button"
@@ -210,7 +210,7 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
                   style={{ justifyContent: 'flex-start', padding: '6px 8px', fontSize: '0.82rem' }}
                   onClick={() => handleDownloadGolden('json')}
                 >
-                  <FileCode size={13} /> Golden Dataset (.JSON)
+                  <FileCode size={13} /> Master Records (.JSON)
                 </button>
               </div>
             </div>
@@ -223,14 +223,14 @@ export const ExportActionControls: React.FC<ExportActionControlsProps> = ({
           className={btnClass}
           onClick={handleExportRecipe}
           disabled={downloading !== null}
-          title="Save this blueprint and rule setup as a reusable .verifygrid.json recipe"
+          title="Save this column mapping and settings as a reusable .verifygrid.json setup file"
         >
           {downloading === 'recipe' ? (
             <span className="spinner" />
           ) : (
             <Bookmark size={14} className="text-accent" />
           )}
-          Export Recipe (.verifygrid.json)
+          Export Setup (.verifygrid.json)
         </button>
       </div>
 

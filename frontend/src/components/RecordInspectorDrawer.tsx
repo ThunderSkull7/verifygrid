@@ -22,6 +22,8 @@ import {
 } from 'lucide-react';
 
 interface RecordInspectorDrawerProps {
+  mode?: 'organization' | 'financial';
+  fileLabels?: Record<string, string>;
   isOpen: boolean;
   onClose: () => void;
   record: VerificationResultItem | DiscrepancyItemResponse | null;
@@ -30,6 +32,8 @@ interface RecordInspectorDrawerProps {
 }
 
 export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
+  mode = 'organization',
+  fileLabels,
   isOpen,
   onClose,
   record,
@@ -114,10 +118,8 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
 
   const inspectionData = embeddedInspectionData || apiInspectionData;
 
-  if (!isOpen || !record) return null;
-
   // Determine severity styling
-  const severity = inspectionData?.severity || record.severity || 'medium';
+  const severity = inspectionData?.severity || record?.severity || 'medium';
   const getSeverityBadgeClass = (s: string) => {
     switch (s.toLowerCase()) {
       case 'high':
@@ -131,14 +133,146 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
     }
   };
 
-  const currencySymbol = (inspectionData?.currency || record.currency) === 'EUR' ? '€' : '$';
-  const exposureAmt = inspectionData?.exposure_amount ?? record.exposure_amount ?? 0;
-  const varianceAmt = inspectionData?.variance_amount ?? record.variance_amount ?? 0;
-  const sourceAmt = inspectionData?.source_amount ?? record.source_amount ?? 0;
-  const targetAmt = inspectionData?.target_amount ?? record.target_amount ?? 0;
+  const currencySymbol = (inspectionData?.currency || record?.currency) === 'EUR' ? '€' : '$';
+  const exposureAmt = inspectionData?.exposure_amount ?? record?.exposure_amount ?? 0;
+  const varianceAmt = inspectionData?.variance_amount ?? record?.variance_amount ?? 0;
+  const sourceAmt = inspectionData?.source_amount ?? record?.source_amount ?? 0;
+  const targetAmt = inspectionData?.target_amount ?? record?.target_amount ?? 0;
 
   // Field comparisons
   const comparisons: FieldComparisonDiff[] = inspectionData?.field_comparisons || [];
+
+  // Clean record identifier for non-technical users (e.g. "student_id: S101 · name: Aarav")
+  const recordIdentifier = useMemo(() => {
+    if (!record?.key_values) return 'Record';
+    const entries = Object.entries(record.key_values);
+    if (entries.length === 0) return 'Record';
+    return entries.map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`).join(' · ');
+  }, [record]);
+
+  const isFinancialMode = mode === 'financial' || exposureAmt > 0 || varianceAmt !== 0;
+
+  // Unified side-by-side comparison rows (Field | Trusted value | Submitted value | Result)
+  const unifiedRows = useMemo(() => {
+    if (comparisons.length > 0) {
+      return comparisons.map((comp) => {
+        const trusted = comp.raw_source_value ?? comp.normalized_source_value;
+        const submitted = comp.raw_target_value ?? comp.normalized_target_value;
+        const isMatch = Boolean(comp.is_match);
+        const trustedBlank = trusted === undefined || trusted === null || String(trusted).trim() === '';
+        const submittedBlank = submitted === undefined || submitted === null || String(submitted).trim() === '';
+        const isMissing = !isMatch && (trustedBlank || submittedBlank || comp.difference_type?.toLowerCase().includes('missing'));
+
+        let resultLabel: 'Match' | 'Difference' | 'Missing' = 'Match';
+        if (!isMatch) {
+          resultLabel = isMissing ? 'Missing' : 'Difference';
+        }
+
+        return {
+          fieldName: comp.field_name,
+          trustedValue: trustedBlank ? 'Blank' : String(trusted),
+          trustedFile: fileLabels?.['source'] || fileLabels?.['primary'] || 'Main File (Trusted)',
+          submittedValue: submittedBlank ? 'Blank' : String(submitted),
+          submittedFile: fileLabels?.['target'] || 'Comparison File',
+          result: resultLabel,
+          differenceType: comp.difference_type,
+          isMatch,
+        };
+      });
+    }
+
+    // Synthesize comparison rows from record data
+    if (!record) return [];
+
+    const recAny = record as any;
+    const rows: Array<{
+      fieldName: string;
+      trustedValue: string;
+      trustedFile: string;
+      submittedValue: string;
+      submittedFile: string;
+      result: 'Match' | 'Difference' | 'Missing' | 'Not checked';
+      differenceType?: string;
+      isMatch: boolean;
+    }> = [];
+
+    const diffMap = new Map<string, any>();
+    ((recAny.field_differences as any[]) || []).forEach((d) => diffMap.set(d.field_name, d));
+    const unverifiedSet = new Set<string>((recAny.unverified_fields as string[]) || []);
+
+    const sourceRecs = (recAny.source_records as Record<string, Record<string, unknown>>) || {};
+    const primaryAlias = recAny.lineage?.primary_alias || Object.keys(sourceRecs)[0] || 'primary';
+    const primaryRec = sourceRecs[primaryAlias] || recAny.source_record || {};
+    const primaryLabel = fileLabels?.[primaryAlias] || 'Main File (Trusted)';
+
+    const otherAliases = Object.keys(sourceRecs).filter((a) => a !== primaryAlias);
+    const targetRec = (otherAliases.length > 0 ? sourceRecs[otherAliases[0]] : null) || recAny.target_record || {};
+    const targetLabel = (otherAliases.length > 0 && fileLabels?.[otherAliases[0]]) || fileLabels?.['target'] || 'Comparison File';
+
+    const allKeys = new Set<string>([
+      ...Object.keys(primaryRec),
+      ...Object.keys(targetRec),
+      ...Array.from(diffMap.keys()),
+      ...Array.from(unverifiedSet),
+    ]);
+
+    // Exclude matching keys from field differences
+    Object.keys(recAny.key_values || {}).forEach((k) => allKeys.delete(k));
+
+    allKeys.forEach((field) => {
+      const diff = diffMap.get(field);
+      const isUnverified = unverifiedSet.has(field);
+
+      let tVal = primaryRec[field];
+      let sVal = targetRec[field];
+
+      if (diff) {
+        if (diff.source_value !== undefined) tVal = diff.source_value;
+        if (diff.target_value !== undefined) sVal = diff.target_value;
+      }
+
+      const tBlank = tVal === undefined || tVal === null || String(tVal).trim() === '';
+      const sBlank = sVal === undefined || sVal === null || String(sVal).trim() === '';
+
+      let res: 'Match' | 'Difference' | 'Missing' | 'Not checked' = 'Match';
+      let dType = diff?.difference_type;
+      let match = false;
+
+      if (isUnverified) {
+        res = 'Not checked';
+        dType = 'unverified';
+      } else if (diff) {
+        res = (tBlank || sBlank) ? 'Missing' : 'Difference';
+      } else if (tBlank && sBlank) {
+        res = 'Match';
+        match = true;
+      } else if (tBlank || sBlank) {
+        res = 'Missing';
+        dType = 'missing_value';
+      } else if (String(tVal).trim().toLowerCase() === String(sVal).trim().toLowerCase()) {
+        res = 'Match';
+        match = true;
+      } else {
+        res = 'Difference';
+        dType = 'field_mismatch';
+      }
+
+      rows.push({
+        fieldName: field,
+        trustedValue: tBlank ? 'Blank' : String(tVal),
+        trustedFile: primaryLabel,
+        submittedValue: sBlank ? 'Blank' : String(sVal),
+        submittedFile: targetLabel,
+        result: res,
+        differenceType: dType,
+        isMatch: match,
+      });
+    });
+
+    return rows;
+  }, [comparisons, record, fileLabels]);
+
+  if (!isOpen || !record) return null;
 
   return (
     <div
@@ -151,6 +285,7 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
         zIndex: 1000,
         display: 'flex',
         justifyContent: 'flex-end',
+        padding: 0,
       }}
       onClick={onClose}
     >
@@ -164,7 +299,9 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
         style={{
           width: expandedDiff ? 'min(88vw, 1100px)' : 'min(640px, 100vw)',
           maxWidth: '100vw',
-          height: '100vh',
+          height: '100dvh',
+          maxHeight: '100dvh',
+          minWidth: 0,
           backgroundColor: 'var(--bg-card, #11141d)',
           borderLeft: '1px solid var(--border-color, #222738)',
           boxShadow: '-8px 0 32px rgba(0, 0, 0, 0.45)',
@@ -185,25 +322,27 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: 12,
             backgroundColor: 'var(--bg-subtle, #161a26)',
           }}
         >
-          <div>
+          <div style={{ flex: '1 1 240px', minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
               <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-dim)' }}>
-                RECORD INSPECTOR
+                RECORD DETAILS
               </span>
               <span className={`badge ${getSeverityBadgeClass(severity)}`} style={{ textTransform: 'uppercase', fontSize: '0.72rem' }}>
                 <ShieldAlert size={12} style={{ marginRight: 3 }} />
                 {severity} Severity
               </span>
             </div>
-            <h3 style={{ margin: 0, fontSize: '1.2rem', fontFamily: 'var(--font-mono, monospace)' }}>
-              {JSON.stringify(record.key_values)}
+            <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 600, overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+              {recordIdentifier}
             </h3>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             <button
               type="button"
               className="btn btn-ghost btn-sm"
@@ -226,11 +365,11 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
         </div>
 
         {/* Content body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
+        <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '24px' }}>
           {loading && (
             <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-dim)' }}>
               <span className="spinner" style={{ marginBottom: 12, display: 'inline-block' }} />
-              <p>Loading full inspection payload &amp; normalization diffs…</p>
+              <p>Loading record details and differences…</p>
             </div>
           )}
 
@@ -265,7 +404,7 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
             {record.reason_code && (
               <div>
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
-                  Reason Code
+                  Difference Code
                 </span>
                 <span className="badge badge-accent" style={{ fontFamily: 'var(--font-mono)', fontSize: '0.78rem' }}>
                   <Tag size={12} style={{ marginRight: 4 }} />
@@ -277,7 +416,7 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
             {record.confidence_score !== undefined && record.confidence_score !== null && (
               <div>
                 <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
-                  Confidence Score
+                  Match Confidence
                 </span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem', fontWeight: 600 }}>
                   {(record.confidence_score * 100).toFixed(1)}%
@@ -287,7 +426,7 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
 
             <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', display: 'block', marginBottom: 2 }}>
-                Resolution Status
+                Review Status
               </span>
               <span
                 className="badge"
@@ -302,105 +441,160 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
             </div>
           </div>
 
-          {/* Financial Materiality KPI Panel */}
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(4, 1fr)',
-              gap: 12,
-              marginBottom: 24,
-              backgroundColor: 'rgba(239, 68, 68, 0.04)',
-              border: '1px solid rgba(239, 68, 68, 0.15)',
-              borderRadius: 'var(--radius-sm, 6px)',
-              padding: '16px',
-            }}
-          >
-            <div>
-              <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
-                Gross Exposure
-              </span>
-              <span
-                style={{
-                  display: 'block',
-                  fontSize: '1.25rem',
-                  fontWeight: 700,
-                  fontFamily: 'var(--font-mono)',
-                  color: exposureAmt > 0 ? 'var(--danger-text, #ef4444)' : 'var(--success-text, #10b981)',
-                }}
-              >
-                {currencySymbol}
-                {exposureAmt.toFixed(2)}
-              </span>
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>|Source - Target|</span>
-            </div>
+          {/* KPI Panel: Financial or Organization */}
+          {isFinancialMode ? (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+                gap: 12,
+                marginBottom: 24,
+                backgroundColor: 'rgba(239, 68, 68, 0.04)',
+                border: '1px solid rgba(239, 68, 68, 0.15)',
+                borderRadius: 'var(--radius-sm, 6px)',
+                padding: '16px',
+              }}
+            >
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Total Difference Amount
+                </span>
+                <span
+                  style={{
+                    display: 'block',
+                    fontSize: '1.25rem',
+                    fontWeight: 700,
+                    fontFamily: 'var(--font-mono)',
+                    color: exposureAmt > 0 ? 'var(--danger-text, #ef4444)' : 'var(--success-text, #10b981)',
+                  }}
+                >
+                  {currencySymbol}
+                  {exposureAmt.toFixed(2)}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>|Main file - Comparison file|</span>
+              </div>
 
-            <div>
-              <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
-                Net Variance
-              </span>
-              <span
-                style={{
-                  display: 'block',
-                  fontSize: '1.25rem',
-                  fontWeight: 700,
-                  fontFamily: 'var(--font-mono)',
-                  color:
-                    varianceAmt > 0
-                      ? 'var(--warning-text, #f59e0b)'
-                      : varianceAmt < 0
-                      ? 'var(--accent, #6366f1)'
-                      : 'var(--text-dim)',
-                }}
-              >
-                {varianceAmt > 0 ? `+${currencySymbol}` : varianceAmt < 0 ? `-${currencySymbol}` : currencySymbol}
-                {Math.abs(varianceAmt).toFixed(2)}
-              </span>
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
-                {varianceAmt > 0 ? 'Source exceeds target' : varianceAmt < 0 ? 'Target exceeds source' : 'Balanced'}
-              </span>
-            </div>
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Net Difference
+                </span>
+                <span
+                  style={{
+                    display: 'block',
+                    fontSize: '1.25rem',
+                    fontWeight: 700,
+                    fontFamily: 'var(--font-mono)',
+                    color:
+                      varianceAmt > 0
+                        ? 'var(--warning-text, #f59e0b)'
+                        : varianceAmt < 0
+                        ? 'var(--accent, #6366f1)'
+                        : 'var(--text-dim)',
+                  }}
+                >
+                  {varianceAmt > 0 ? `+${currencySymbol}` : varianceAmt < 0 ? `-${currencySymbol}` : currencySymbol}
+                  {Math.abs(varianceAmt).toFixed(2)}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                  {varianceAmt > 0 ? 'Main file exceeds comparison file' : varianceAmt < 0 ? 'Comparison file exceeds main file' : 'Balanced'}
+                </span>
+              </div>
 
-            <div>
-              <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
-                Source Amount
-              </span>
-              <span
-                style={{
-                  display: 'block',
-                  fontSize: '1.15rem',
-                  fontWeight: 600,
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {currencySymbol}
-                {sourceAmt.toFixed(2)}
-              </span>
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Baseline Claimed</span>
-            </div>
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Main File Amount
+                </span>
+                <span
+                  style={{
+                    display: 'block',
+                    fontSize: '1.15rem',
+                    fontWeight: 600,
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {currencySymbol}
+                  {sourceAmt.toFixed(2)}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Main File Value</span>
+              </div>
 
-            <div>
-              <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
-                Target Amount
-              </span>
-              <span
-                style={{
-                  display: 'block',
-                  fontSize: '1.15rem',
-                  fontWeight: 600,
-                  fontFamily: 'var(--font-mono)',
-                }}
-              >
-                {currencySymbol}
-                {targetAmt.toFixed(2)}
-              </span>
-              <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Reconciled Matched</span>
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Comparison File Amount
+                </span>
+                <span
+                  style={{
+                    display: 'block',
+                    fontSize: '1.15rem',
+                    fontWeight: 600,
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  {currencySymbol}
+                  {targetAmt.toFixed(2)}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Comparison File Value</span>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+                gap: 12,
+                marginBottom: 24,
+                backgroundColor: 'var(--bg-subtle, #161a26)',
+                border: '1px solid var(--border-color, #222738)',
+                borderRadius: 'var(--radius-sm, 6px)',
+                padding: '14px 16px',
+              }}
+            >
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Fields Evaluated
+                </span>
+                <span style={{ display: 'block', fontSize: '1.25rem', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                  {unifiedRows.length}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Total compared fields</span>
+              </div>
+
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Matching Fields
+                </span>
+                <span style={{ display: 'block', fontSize: '1.25rem', fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--success-text)' }}>
+                  {unifiedRows.filter((r) => r.result === 'Match').length}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Identical values</span>
+              </div>
+
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Differences
+                </span>
+                <span style={{ display: 'block', fontSize: '1.25rem', fontWeight: 700, fontFamily: 'var(--font-mono)', color: unifiedRows.some((r) => r.result === 'Difference') ? 'var(--danger-text)' : 'var(--text-main)' }}>
+                  {unifiedRows.filter((r) => r.result === 'Difference').length}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Conflicting values</span>
+              </div>
+
+              <div>
+                <span className="metric-label" style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  Missing / Blank
+                </span>
+                <span style={{ display: 'block', fontSize: '1.25rem', fontWeight: 700, fontFamily: 'var(--font-mono)', color: unifiedRows.some((r) => r.result === 'Missing' || r.result === 'Not checked') ? 'var(--warning-text)' : 'var(--text-main)' }}>
+                  {unifiedRows.filter((r) => r.result === 'Missing' || r.result === 'Not checked').length}
+                </span>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>Blank or not present</span>
+              </div>
+            </div>
+          )}
 
           {/* Lineage Coordinates Bar */}
           <div style={{ marginBottom: 24 }}>
             <h4 style={{ margin: '0 0 8px 0', fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-              <FileSpreadsheet size={15} className="text-accent" /> Source Lineage &amp; Cross-Dataset Row Coordinates
+              <FileSpreadsheet size={15} className="text-accent" /> Row Location in Each Spreadsheet
             </h4>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {record.source_row_indices ? (
@@ -425,17 +619,17 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
                         color: rNum ? 'var(--accent)' : 'var(--danger-text)',
                       }}
                     >
-                      {rNum ? `Row #${rNum}` : 'Missing in source'}
+                      {rNum ? `Row #${rNum}` : 'Missing in file'}
                     </span>
                   </div>
                 ))
               ) : (
                 <div style={{ display: 'flex', gap: 12 }}>
                   <span className="badge" style={{ fontSize: '0.8rem' }}>
-                    <strong>Source:</strong> Row #{record.source_row_number ?? record.source_row_index ?? '—'}
+                    <strong>Main file:</strong> Row #{record.source_row_number ?? record.source_row_index ?? '—'}
                   </span>
                   <span className="badge" style={{ fontSize: '0.8rem' }}>
-                    <strong>Target:</strong> Row #{record.target_row_number ?? record.target_row_index ?? '—'}
+                    <strong>Comparison file:</strong> Row #{record.target_row_number ?? record.target_row_index ?? '—'}
                   </span>
                 </div>
               )}
@@ -446,7 +640,7 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
           {inspectionData?.failed_rules && inspectionData.failed_rules.length > 0 && (
             <div style={{ marginBottom: 24 }}>
               <h4 style={{ margin: '0 0 8px 0', fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <AlertTriangle size={15} className="text-warning" /> Decision Diagnostics &amp; Failed Rules
+                <AlertTriangle size={15} className="text-warning" /> Why This Record Flagged a Difference
               </h4>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {inspectionData.failed_rules.map((rule, idx) => (
@@ -487,14 +681,14 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <h4 style={{ margin: 0, fontSize: '0.88rem', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <ArrowRightLeft size={15} className="text-accent" /> Side-by-Side Field Comparison (Raw vs. Normalized)
+                <ArrowRightLeft size={15} className="text-accent" /> Side-by-Side Column Comparison
               </h4>
               <span className="text-xs text-dim">
-                {comparisons.filter((c) => !c.is_match).length} differences detected
+                {unifiedRows.filter((c) => !c.isMatch).length} differences detected
               </span>
             </div>
 
-            {comparisons.length === 0 ? (
+            {unifiedRows.length === 0 ? (
               <div
                 style={{
                   padding: '24px',
@@ -505,7 +699,7 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
                 }}
               >
                 <CheckCircle size={20} className="text-success" style={{ marginBottom: 6 }} />
-                <p style={{ margin: 0, fontSize: '0.85rem' }}>All fields are identically matched.</p>
+                <p style={{ margin: 0, fontSize: '0.85rem' }}>All columns match identically.</p>
               </div>
             ) : (
               <div
@@ -516,96 +710,86 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
                   overflowX: 'auto',
                 }}
               >
-                <table className="data-table" style={{ width: '100%', fontSize: '0.82rem' }}>
+                <table className="data-table inspector-diff-table" style={{ width: '100%', fontSize: '0.82rem' }}>
                   <thead>
                     <tr>
-                      <th style={{ width: '18%' }}>Field Name</th>
-                      <th style={{ width: '22%' }}>Raw Source</th>
-                      <th style={{ width: '22%' }}>Normalized Source</th>
-                      <th style={{ width: '22%' }}>Raw Target</th>
-                      <th style={{ width: '22%' }}>Normalized Target</th>
-                      <th style={{ width: '14%' }}>Comparison</th>
+                      <th style={{ width: '22%' }}>Field Name</th>
+                      <th style={{ width: '32%' }}>Main File (Original)</th>
+                      <th style={{ width: '32%' }}>Comparison File (Original)</th>
+                      <th style={{ width: '14%' }}>Result</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {comparisons.map((comp) => {
-                      const isMismatch = !comp.is_match;
+                    {unifiedRows.map((row) => {
+                      const isDifference = row.result === 'Difference';
+                      const isMissing = row.result === 'Missing';
+                      const isUnverified = row.result === 'Not checked';
+                      const bg = isDifference
+                        ? 'rgba(239, 68, 68, 0.08)'
+                        : isMissing
+                        ? 'rgba(245, 158, 11, 0.06)'
+                        : isUnverified
+                        ? 'rgba(100, 116, 139, 0.05)'
+                        : 'transparent';
+
                       return (
-                        <tr
-                          key={comp.field_name}
-                          style={{
-                            backgroundColor: isMismatch ? 'rgba(239, 68, 68, 0.08)' : 'transparent',
-                          }}
-                        >
-                          <td style={{ fontWeight: 600, fontFamily: 'var(--font-mono)' }}>
-                            {comp.field_name}
-                          </td>
-                          <td
-                            style={{
-                              fontFamily: 'var(--font-mono)',
-                              color: 'var(--text-dim)',
-                              backgroundColor: 'rgba(0,0,0,0.1)',
-                            }}
-                          >
-                            {comp.raw_source_value !== null && comp.raw_source_value !== undefined ? (
-                              String(comp.raw_source_value)
-                            ) : (
-                              <span className="text-dim">null</span>
-                            )}
-                          </td>
-                          <td
-                            style={{
-                              fontFamily: 'var(--font-mono)',
-                              fontWeight: isMismatch ? 600 : 400,
-                              color: isMismatch ? 'var(--danger-text)' : 'var(--text-main)',
-                            }}
-                          >
-                            {comp.normalized_source_value !== null && comp.normalized_source_value !== undefined ? (
-                              String(comp.normalized_source_value)
-                            ) : (
-                              <span className="text-dim">null</span>
-                            )}
-                          </td>
-                          <td
-                            style={{
-                              fontFamily: 'var(--font-mono)',
-                              color: 'var(--text-dim)',
-                              backgroundColor: 'rgba(0,0,0,0.1)',
-                            }}
-                          >
-                            {comp.raw_target_value !== null && comp.raw_target_value !== undefined ? (
-                              String(comp.raw_target_value)
-                            ) : (
-                              <span className="text-dim">null</span>
-                            )}
-                          </td>
-                          <td
-                            style={{
-                              fontFamily: 'var(--font-mono)',
-                              fontWeight: isMismatch ? 600 : 400,
-                              color: isMismatch ? 'var(--warning-text)' : 'var(--text-main)',
-                            }}
-                          >
-                            {comp.normalized_target_value !== null && comp.normalized_target_value !== undefined ? (
-                              String(comp.normalized_target_value)
-                            ) : (
-                              <span className="text-dim">null</span>
-                            )}
+                        <tr key={row.fieldName} style={{ backgroundColor: bg }}>
+                          <td>
+                            <strong style={{ fontFamily: 'var(--font-mono)' }}>{row.fieldName}</strong>
                           </td>
                           <td>
-                            {isMismatch ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                               <span
-                                className="badge badge-danger"
-                                style={{ fontSize: '0.72rem', padding: '2px 6px' }}
+                                style={{
+                                  fontFamily: 'var(--font-mono)',
+                                  fontWeight: isDifference ? 600 : 400,
+                                  color: row.trustedValue === 'Blank' ? 'var(--text-dim)' : 'var(--text-main)',
+                                  fontStyle: row.trustedValue === 'Blank' ? 'italic' : 'normal',
+                                }}
                               >
-                                {comp.difference_type || 'Mismatch'}
+                                {row.trustedValue}
                               </span>
-                            ) : (
+                              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>{row.trustedFile}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                               <span
-                                className="badge badge-success"
-                                style={{ fontSize: '0.72rem', padding: '2px 6px' }}
+                                style={{
+                                  fontFamily: 'var(--font-mono)',
+                                  fontWeight: isDifference ? 600 : 400,
+                                  color: isDifference
+                                    ? 'var(--danger-text)'
+                                    : row.submittedValue === 'Blank'
+                                    ? 'var(--text-dim)'
+                                    : 'var(--text-main)',
+                                  fontStyle: row.submittedValue === 'Blank' ? 'italic' : 'normal',
+                                }}
                               >
+                                {row.submittedValue}
+                              </span>
+                              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>{row.submittedFile}</span>
+                            </div>
+                          </td>
+                          <td>
+                            {row.result === 'Match' && (
+                              <span className="badge badge-success" style={{ fontSize: '0.72rem', padding: '2px 8px' }}>
                                 Match
+                              </span>
+                            )}
+                            {row.result === 'Difference' && (
+                              <span className="badge badge-danger" style={{ fontSize: '0.72rem', padding: '2px 8px' }}>
+                                Difference
+                              </span>
+                            )}
+                            {row.result === 'Missing' && (
+                              <span className="badge badge-warning" style={{ fontSize: '0.72rem', padding: '2px 8px' }}>
+                                Missing
+                              </span>
+                            )}
+                            {row.result === 'Not checked' && (
+                              <span className="badge badge-neutral" style={{ fontSize: '0.72rem', padding: '2px 8px' }}>
+                                Not checked
                               </span>
                             )}
                           </td>
@@ -622,13 +806,13 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
           {record.child_records && record.child_records.length > 0 && (
             <div style={{ marginTop: 24 }}>
               <h4 style={{ margin: '0 0 8px 0', fontSize: '0.88rem' }}>
-                Child Payment Receipts ({record.child_records.length} Installments)
+                Split Payments ({record.child_records.length} Installments)
               </h4>
               <div
+                className="table-container"
                 style={{
                   border: '1px solid var(--border-color)',
                   borderRadius: 'var(--radius-sm)',
-                  overflow: 'hidden',
                 }}
               >
                 <table className="data-table" style={{ width: '100%', fontSize: '0.8rem' }}>
@@ -665,14 +849,16 @@ export const RecordInspectorDrawer: React.FC<RecordInspectorDrawerProps> = ({
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
+            gap: 12,
+            flexWrap: 'wrap',
             backgroundColor: 'var(--bg-subtle, #161a26)',
           }}
         >
-          <span className="text-xs text-dim">
+          <span className="text-xs text-dim" style={{ flex: '1 1 200px', minWidth: 0 }}>
             Press <kbd style={{ padding: '2px 4px', borderRadius: 3, border: '1px solid var(--border-color)' }}>Esc</kbd> to close
           </span>
           <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>
-            Close Inspector
+            Close Details
           </button>
         </div>
       </div>
