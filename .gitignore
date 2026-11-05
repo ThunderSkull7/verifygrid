@@ -10,3 +10,4 @@ storage/
 .mypy_cache/
 .idea/
 .vscode/
+node_modules/
