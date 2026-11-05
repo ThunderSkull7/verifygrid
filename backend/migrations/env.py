@@ -249,10 +249,22 @@ def validate_target_url(
 
     endpoint_id = host.split(".")[0].strip().lower()
 
+    # Determine effective production endpoint (configured or default)
+    configured_prod_endpoint = (
+        (x_dict.get("production_endpoint_id") or x_dict.get("endpoint_id") or env_dict.get(PRODUCTION_ENDPOINT_ENV) or "")
+    ).strip().lower()
+    effective_prod_endpoint = configured_prod_endpoint or KNOWN_PRODUCTION_ENDPOINT
+
     if is_staging:
-        if endpoint_id == KNOWN_PRODUCTION_ENDPOINT:
+        disallowed_prod_endpoints = {KNOWN_PRODUCTION_ENDPOINT.lower(), effective_prod_endpoint}
+        if endpoint_id in disallowed_prod_endpoints:
+            prod_desc = (
+                f"known production endpoint '{KNOWN_PRODUCTION_ENDPOINT}'"
+                if endpoint_id == KNOWN_PRODUCTION_ENDPOINT.lower()
+                else f"configured production endpoint '{endpoint_id}'"
+            )
             raise MigrationTargetError(
-                f"Refusing staging migration against known production endpoint '{KNOWN_PRODUCTION_ENDPOINT}'. "
+                f"Refusing staging migration against {prod_desc}. "
                 "Staging authorization cannot be used for production targets."
             )
 
@@ -268,6 +280,11 @@ def validate_target_url(
         expected_staging_endpoint = (
             (x_dict.get("staging_endpoint_id") or x_dict.get("endpoint_id") or env_dict.get(STAGING_ENDPOINT_ENV) or "")
         ).strip().lower()
+        if expected_staging_endpoint and expected_staging_endpoint in disallowed_prod_endpoints:
+            raise MigrationTargetError(
+                f"Conflicting configuration: expected staging endpoint '{expected_staging_endpoint}' "
+                "matches a production endpoint."
+            )
         if expected_staging_endpoint and expected_staging_endpoint != endpoint_id:
             raise MigrationTargetError(
                 f"Target endpoint '{endpoint_id}' does not match expected staging endpoint '{expected_staging_endpoint}'."
@@ -276,6 +293,11 @@ def validate_target_url(
         if staging_ack.lower() != endpoint_id:
             raise MigrationTargetError(
                 f"Staging acknowledgement '{staging_ack}' does not match target endpoint ID '{endpoint_id}'."
+            )
+
+        if staging_ack.lower() in disallowed_prod_endpoints:
+            raise MigrationTargetError(
+                f"Refusing staging migration with production acknowledgement '{staging_ack}'."
             )
 
         db_name = (url.database or "").strip().lower()
@@ -290,9 +312,7 @@ def validate_target_url(
             )
 
     if is_production:
-        expected_prod_endpoint = (
-            (x_dict.get("production_endpoint_id") or x_dict.get("endpoint_id") or env_dict.get(PRODUCTION_ENDPOINT_ENV) or "")
-        ).strip().lower() or KNOWN_PRODUCTION_ENDPOINT
+        expected_prod_endpoint = effective_prod_endpoint
 
         if endpoint_id != expected_prod_endpoint:
             raise MigrationTargetError(
@@ -400,54 +420,55 @@ def _assert_server_identity(
 ) -> None:
     """Check the live database, role, and server address before DDL."""
     already_in_transaction = connection.in_transaction()
-    row = connection.execute(
-        text("SELECT current_database(), current_user, inet_server_addr()")
-    ).one()
-    database, username, server_address = row[0], row[1], row[2]
-
-    if not already_in_transaction and connection.in_transaction():
-        # End the read-only identity transaction so Alembic can own the DDL
-        # transaction. A caller-supplied transaction is left untouched.
-        connection.rollback()
-
-    if database != (url.database or "").strip():
-        raise MigrationTargetError(
-            "The connected database does not match the validated migration target."
-        )
-    if username != (url.username or "").strip():
-        raise MigrationTargetError(
-            "The connected role does not match the validated migration target."
-        )
-
-    if server_address is None:
-        raise MigrationTargetError(
-            "The server did not report a TCP address; refusing to migrate an "
-            "unverifiable target."
-        )
-
-    address = str(server_address).strip()
+    identity_check_failed = False
     try:
-        address_is_loopback = ipaddress.ip_address(address).is_loopback
-    except ValueError:
-        raise MigrationTargetError(
-            "The server reported an unrecognized address; refusing to migrate."
-        ) from None
+        row = connection.execute(
+            text("SELECT current_database(), current_user, inet_server_addr()")
+        ).one()
+        database, username, server_address = row[0], row[1], row[2]
 
-    if require_loopback and not address_is_loopback:
-        raise MigrationTargetError(
-            "The connected server address is not loopback; refusing an isolated "
-            "test migration."
-        )
-    if not require_loopback and address_is_loopback:
-        raise MigrationTargetError(
-            "The migration target is non-loopback but the server reported a "
-            "loopback address; refusing an ambiguous target."
-        )
+        if database != (url.database or "").strip():
+            raise MigrationTargetError(
+                "The connected database does not match the validated migration target."
+            )
+        if username != (url.username or "").strip():
+            raise MigrationTargetError(
+                "The connected role does not match the validated migration target."
+            )
 
-    # Post-connection Neon endpoint identity verification
-    if not require_loopback and url.host:
-        endpoint_id = extract_endpoint_id(url.host)
-        if endpoint_id:
+        if server_address is None:
+            raise MigrationTargetError(
+                "The server did not report a TCP address; refusing to migrate an "
+                "unverifiable target."
+            )
+
+        address = str(server_address).strip()
+        try:
+            address_is_loopback = ipaddress.ip_address(address).is_loopback
+        except ValueError:
+            raise MigrationTargetError(
+                "The server reported an unrecognized address; refusing to migrate."
+            ) from None
+
+        if require_loopback and not address_is_loopback:
+            raise MigrationTargetError(
+                "The connected server address is not loopback; refusing an isolated "
+                "test migration."
+            )
+        if not require_loopback and address_is_loopback:
+            raise MigrationTargetError(
+                "The migration target is non-loopback but the server reported a "
+                "loopback address; refusing an ambiguous target."
+            )
+
+        # Post-connection Neon endpoint identity verification
+        if not require_loopback:
+            endpoint_id = extract_endpoint_id(url.host)
+            if not endpoint_id:
+                raise MigrationTargetError(
+                    f"Cannot determine expected Neon endpoint ID from target host '{url.host}'."
+                )
+
             try:
                 res = connection.execute(text("SELECT current_setting('neon.endpoint_id', true)"))
                 neon_endpoint = None
@@ -456,17 +477,44 @@ def _assert_server_identity(
                 elif hasattr(res, "one"):
                     r = res.one()
                     neon_endpoint = r[0] if isinstance(r, (tuple, list)) else r
-                if neon_endpoint:
-                    ep_str = str(neon_endpoint).strip().lower()
-                    if ep_str.startswith("ep-") and ep_str != endpoint_id.lower():
-                        raise MigrationTargetError(
-                            f"Connected Neon endpoint '{neon_endpoint}' does not match "
-                            f"expected target endpoint '{endpoint_id}'."
-                        )
             except MigrationTargetError:
                 raise
+            except Exception as err:
+                raise MigrationTargetError(
+                    f"Failed to query server setting 'neon.endpoint_id': {err}"
+                ) from err
+
+            if neon_endpoint is None or not str(neon_endpoint).strip():
+                raise MigrationTargetError(
+                    "The server did not report a 'neon.endpoint_id' setting; "
+                    "refusing to migrate an unverifiable Neon target."
+                )
+
+            ep_str = str(neon_endpoint).strip().lower()
+            if not ep_str.startswith("ep-"):
+                raise MigrationTargetError(
+                    f"Server reported malformed Neon endpoint ID '{neon_endpoint}'; expected ID starting with 'ep-'."
+                )
+
+            if ep_str != endpoint_id.lower():
+                raise MigrationTargetError(
+                    f"Connected Neon endpoint '{neon_endpoint}' does not match "
+                    f"expected target endpoint '{endpoint_id}'."
+                )
+    except Exception:
+        identity_check_failed = True
+        raise
+    finally:
+        if not already_in_transaction and connection.in_transaction():
+            # End the read-only identity transaction so Alembic can own the DDL
+            # transaction. A caller-supplied transaction is left untouched.
+            try:
+                connection.rollback()
             except Exception:
-                pass
+                # If an exception is already in flight from the identity check,
+                # do not let a cleanup/rollback error suppress or conceal it.
+                if not identity_check_failed:
+                    raise
 
 
 def _validate_programmatic_url(url: URL) -> bool:
