@@ -267,3 +267,10 @@ pytest tests/test_auth.py tests/test_verification_persistence.py -v
 ```
 
 The test suite isolates unit tests using in-memory SQLite fixtures (`sqlite:///:memory:`) configured in `tests/conftest.py`.
+
+
+## Production authentication configuration
+
+Set `VERIFYGRID_ENV=production` and provide a unique high-entropy `SECRET_KEY` through the hosting provider's secret store. The service now refuses to start in production if the built-in development key is still active. Keep `DEBUG=false`; never commit a production key or paste it into logs or issue reports.
+
+The `.env.example` value is a development placeholder. Generate a deployment key locally with Python's `secrets.token_urlsafe(48)` and store it directly in the host's secret settings.
